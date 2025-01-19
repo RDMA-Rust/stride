@@ -1,0 +1,133 @@
+use clap::{Args, Parser, Subcommand};
+use crate::cli::context::CommandContext;
+
+#[derive(Parser)]
+#[command(name = "stride-perf")]
+#[command(about = "RDMA performance testing tool")]
+pub struct PerfCli {
+    #[command(subcommand)]
+    pub command: PerfCommands,
+}
+
+#[derive(Subcommand)]
+pub enum PerfCommands {
+    #[command(subcommand)]
+    Send(SendCommands),
+    #[command(subcommand)]
+    Write(WriteCommands),
+    #[command(subcommand)]
+    Read(ReadCommands),
+}
+
+#[derive(Subcommand)]
+pub enum SendCommands {
+    #[command(alias = "bw")]
+    Bandwidth(SendBandwidthArgs),
+    #[command(alias = "lat")]
+    Latency(SendLatencyArgs),
+}
+
+#[derive(Args)]
+pub struct SendBandwidthArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Size of Tx queue
+    #[arg(long, short = 't', default_value_t = 128)]
+    pub tx_depth: u32,
+    /// Size of Rx queue
+    #[arg(long)]
+    pub rx_depth: Option<u32>,
+    /// Use send-with-immediate verb instead of send
+    #[arg(long)]
+    pub imm_data: bool,
+}
+
+#[derive(Args)]
+pub struct SendLatencyArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Size of Tx queue
+    #[arg(long)]
+    pub tx_depth: Option<u32>,
+    /// Size of Rx queue
+    #[arg(long)]
+    pub rx_depth: Option<u32>,
+    /// Use send-with-immediate verb instead of send
+    #[arg(long)]
+    pub imm_data: bool,
+}
+
+#[derive(Subcommand)]
+pub enum WriteCommands {
+    #[command(alias = "bw")]
+    Bandwidth(WriteBandwidthArgs),
+    #[command(alias = "lat")]
+    Latency(WriteLatencyArgs),
+}
+
+#[derive(Args)]
+pub struct WriteBandwidthArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Size of Tx queue
+    #[arg(long, short = 't', default_value_t = 128)]
+    pub tx_depth: u32,
+    /// Use write-with-immediate verb instead of write
+    #[arg(long)]
+    pub imm_data: bool,
+}
+
+#[derive(Args)]
+pub struct WriteLatencyArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Size of Tx queue
+    #[arg(long, short = 't')]
+    pub tx_depth: Option<u32>,
+    /// Use write-with-immediate verb instead of write
+    #[arg(long)]
+    pub imm_data: bool,
+}
+
+#[derive(Subcommand)]
+pub enum ReadCommands {
+    #[command(alias = "bw")]
+    Bandwidth(ReadBandwidthArgs),
+    #[command(alias = "lat")]
+    Latency(ReadLatencyArgs),
+}
+
+#[derive(Args)]
+pub struct ReadBandwidthArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    #[arg(long)]
+    pub tx_depth: Option<u32>,
+}
+
+#[derive(Args)]
+pub struct ReadLatencyArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    #[arg(long)]
+    pub tx_depth: Option<u32>,
+}
+
+#[derive(Args)]
+pub struct CommonArgs {
+    /// Use IB device <DEVICE> [default: first device found]
+    #[arg(long, short = 'd')]
+    pub device: Option<String>,
+    /// Test uses GID with GID index taken from command
+    #[arg(long, short = 'x')]
+    pub gid_index: Option<u32>,
+    /// Number of exchanges (at least 100)
+    #[arg(long, short = 'n', default_value_t = 1000)]
+    pub iters: u32,
+    /// Message size in bytes
+    #[arg(long, short = 's', default_value_t = 65536)]
+    pub msg_size: u32,
+    /// QP timeout = (4 us) * (2 ^ timeout)
+    #[arg(long, short = 'u', default_value_t = 14)]
+    pub qp_timeout: u8,
+}

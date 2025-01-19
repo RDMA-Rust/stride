@@ -1,0 +1,36 @@
+[package]
+name = "stride-perf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sideway = { git = "https://github.com/RDMA-Rust/sideway.git", branch = "main" }
+pci-info = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+strum = { version = "0.27", features = ["derive"] }
+paste = "1"
+clap = { version = "4.5", features = ["derive"] }
+tabled = "0.18"
+postcard = { version = "1.1", features = ["alloc"] }
+thiserror = "2"
+anyhow = "1"
+memmap2 = "0.9"
+quanta = "0.12"
+byte-unit = "5.1"
+rand = "0.8"
+
+[lib]
+name = "stride"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stride-perf"
+path = "src/bin/stride-perf.rs"
+
+[[bin]]
+name = "stride-bench"
+path = "src/bin/stride-bench.rs"
+
+[[bin]]
+name = "stride-probe"
+path = "src/bin/stride-probe.rs"
