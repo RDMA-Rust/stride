@@ -1,5 +1,4 @@
 use clap::Parser;
-use sideway::ibverbs::device::DeviceInfo;
 use stride::cli::probe::ProbeCli;
 use stride::utils::device::probe_devices;
 

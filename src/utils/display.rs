@@ -12,6 +12,18 @@ pub const DEFAULT_COLUMN_SPACING: usize = 10;
 pub const DEFAULT_KEY_VALUE_SPACING: usize = 1; // Includes ":    " spacing
 pub const DEFAULT_HEADER_MARGIN_LEN: usize = 2; // Space length around header text
 
+// Bandwidth and message rate column widths
+pub const SIZE_COLUMN_WIDTH: usize = 12;
+pub const ITERATIONS_COLUMN_WIDTH: usize = 12;
+pub const BANDWIDTH_COLUMN_WIDTH: usize = 18;
+pub const MSG_RATE_COLUMN_WIDTH: usize = 18;
+pub const SEPARATOR_WIDTH: usize = 3;  // Width of a single separator character
+pub const COLUMN_COUNT: usize = 5;     // Total number of columns
+pub const START_AND_END_SPACES_WIDTH: usize = 2; // Width of start and end spaces
+
+// Latency column widths
+pub const LATENCY_COLUMN_WIDTH: usize = 18;
+
 macro_rules! header_width {
     () => {
         DEFAULT_HEADER_WIDTH
@@ -31,6 +43,30 @@ pub struct TestConfiguration {
     pub gid_type: String,
     pub rx_depth: u32,
     pub tx_depth: u32,
+    pub test_type: TestType,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TestType {
+    SendBandwidth,
+    SendLatency,
+    WriteBandwidth,
+    WriteLatency,
+    ReadBandwidth,
+    ReadLatency,
+}
+
+impl Display for TestType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TestType::SendBandwidth => write!(f, "RDMA Send Bandwidth Test"),
+            TestType::SendLatency => write!(f, "RDMA Send Latency Test"),
+            TestType::WriteBandwidth => write!(f, "RDMA Write Bandwidth Test"),
+            TestType::WriteLatency => write!(f, "RDMA Write Latency Test"),
+            TestType::ReadBandwidth => write!(f, "RDMA Read Bandwidth Test"),
+            TestType::ReadLatency => write!(f, "RDMA Read Latency Test"),
+        }
+    }
 }
 
 #[derive(Tabled)]
@@ -87,11 +123,34 @@ pub struct BandwidthResult {
     pub time: String,
 }
 
+#[derive(Tabled)]
+pub struct LatencyResult {
+    #[tabled(rename = "Size (B)")]
+    pub size: u32,
+    #[tabled(rename = "Iterations")]
+    pub iterations: u32,
+    #[tabled(rename = "t_min [usec]")]
+    pub min_latency: f64,
+    #[tabled(rename = "t_max [usec]")]
+    pub max_latency: f64,
+    #[tabled(rename = "t_typical [usec]")]
+    pub typical_latency: f64,
+    #[tabled(rename = "t_avg [usec]")]
+    pub avg_latency: f64,
+    #[tabled(rename = "t_stdev [usec]")]
+    pub stdev_latency: f64,
+    #[tabled(rename = "P99 [usec]")]
+    pub p99_latency: f64,
+    #[tabled(rename = "P999 [usec]")]
+    pub p999_latency: f64,
+}
+
 pub struct DisplayOutput {
     config: TestConfiguration,
     qp_details: Vec<QueuePairDetail>,
     gid_info: Vec<GidEntry>,
-    results: Option<BandwidthResult>,
+    bw_results: Option<BandwidthResult>,
+    lat_results: Option<LatencyResult>,
 }
 
 fn format_bandwidth(f: &f64) -> String {
@@ -100,6 +159,13 @@ fn format_bandwidth(f: &f64) -> String {
 
 fn format_msg_rate(f: &f64) -> String {
     format!("{:.4}", f)
+}
+
+pub fn min_required_table_width() -> usize {
+    SIZE_COLUMN_WIDTH + ITERATIONS_COLUMN_WIDTH +
+    BANDWIDTH_COLUMN_WIDTH + MSG_RATE_COLUMN_WIDTH +
+    // Account for minimum width needed for time column and separators
+    10 + (SEPARATOR_WIDTH * (COLUMN_COUNT - 1)) + START_AND_END_SPACES_WIDTH
 }
 
 fn create_header(text: &str, width: usize, margin_len: usize) -> String {
@@ -128,12 +194,17 @@ impl DisplayOutput {
             config,
             qp_details,
             gid_info,
-            results: None,
+            bw_results: None,
+            lat_results: None,
         }
     }
 
-    pub fn set_results(&mut self, results: BandwidthResult) {
-        self.results = Some(results);
+    pub fn set_bandwidth_results(&mut self, results: BandwidthResult) {
+        self.bw_results = Some(results);
+    }
+
+    pub fn set_latency_results(&mut self, results: LatencyResult) {
+        self.lat_results = Some(results);
     }
 
     fn format_qp_details(&self) -> String {
@@ -166,7 +237,7 @@ impl DisplayOutput {
         println!(
             "{}",
             create_header(
-                "Test Configuration",
+                &format!("{}", self.config.test_type),
                 header_width!(),
                 DEFAULT_HEADER_MARGIN_LEN
             )
@@ -175,21 +246,68 @@ impl DisplayOutput {
 
         println!(
             "{}",
-            create_header("QP Details", header_width!(), DEFAULT_HEADER_MARGIN_LEN)
+            create_header("Connection Details", header_width!(), DEFAULT_HEADER_MARGIN_LEN)
         );
         println!("{}\n", self.format_qp_details());
 
-        if let Some(results) = &self.results {
+        if let Some(results) = &self.bw_results {
             println!(
                 "{}",
-                create_header("Results", header_width!(), DEFAULT_HEADER_MARGIN_LEN)
+                create_header("Bandwidth Results", header_width!(), DEFAULT_HEADER_MARGIN_LEN)
             );
+
+            // Ensure our header width can accommodate the table
+            let table_width = header_width!();
+            let required_width = min_required_table_width();
+
+            // Assert to catch potential layout issues during development
+            debug_assert!(
+                table_width >= required_width,
+                "Header width {} is insufficient for table minimum width {}",
+                table_width,
+                required_width
+            );
+
+            // Calculate remaining width for the last column
+            let defined_width = SIZE_COLUMN_WIDTH + ITERATIONS_COLUMN_WIDTH +
+                                BANDWIDTH_COLUMN_WIDTH + MSG_RATE_COLUMN_WIDTH +
+                                (SEPARATOR_WIDTH * (COLUMN_COUNT - 1)) + START_AND_END_SPACES_WIDTH;
+
+            let remaining_width = table_width.saturating_sub(defined_width);
+
+            // Set time column to fill remaining space (with a reasonable minimum)
+            let time_column_width = std::cmp::max(10, remaining_width);
+
+            // Improved table formatting with constants
             let table = Table::new([results])
                 .with(Style::psql())
-                .with(Width::wrap(header_width!()))
-                .with(Width::increase(header_width!()))
-                .modify(Columns::single(0), Width::increase(10))
+                .with(Width::increase(table_width))
+                .modify(Columns::single(0), Width::truncate(SIZE_COLUMN_WIDTH))
+                .modify(Columns::single(0), Width::increase(SIZE_COLUMN_WIDTH))
+                .modify(Columns::single(1), Width::truncate(ITERATIONS_COLUMN_WIDTH))
+                .modify(Columns::single(1), Width::increase(ITERATIONS_COLUMN_WIDTH))
+                .modify(Columns::single(2), Width::truncate(BANDWIDTH_COLUMN_WIDTH))
+                .modify(Columns::single(2), Width::increase(BANDWIDTH_COLUMN_WIDTH))
+                .modify(Columns::single(3), Width::truncate(MSG_RATE_COLUMN_WIDTH))
+                .modify(Columns::single(3), Width::increase(MSG_RATE_COLUMN_WIDTH))
+                .modify(Columns::single(4), Width::truncate(time_column_width))
+                .modify(Columns::single(4), Width::increase(time_column_width))
                 .to_string();
+
+            println!("{}", table);
+        }
+
+        if let Some(results) = &self.lat_results {
+            println!(
+                "{}",
+                create_header("Latency Results", header_width!(), DEFAULT_HEADER_MARGIN_LEN)
+            );
+
+            let mut table = Table::new([results])
+                .with(Style::psql())
+                .with(Width::increase(header_width!()))
+                .to_string();
+
             println!("{}", table);
         }
     }

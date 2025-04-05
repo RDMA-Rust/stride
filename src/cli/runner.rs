@@ -14,7 +14,7 @@ use sideway::ibverbs::AccessFlags;
 use crate::context::device::open_device_context;
 use crate::memory::system::SystemMemory;
 use crate::memory::MemoryOps;
-use crate::utils::display::{BandwidthResult, DisplayOutput, QueuePairDetail, TestConfiguration};
+use crate::utils::display::{BandwidthResult, DisplayOutput, QueuePairDetail, TestConfiguration, TestType};
 use crate::utils::random;
 use crate::cli::context::CommandContext;
 
@@ -49,6 +49,7 @@ impl<T: CommandContext> TestRunner<T> {
             gid_type: format!("{:?}", gid.gid_type()),
             rx_depth: self.params.rx_depth().unwrap_or(512),
             tx_depth,
+            test_type: TestType::SendBandwidth,
         };
 
         // Create QP details with random PSNs
@@ -92,6 +93,7 @@ impl<T: CommandContext> TestRunner<T> {
             .into();
 
         let mut builder = pd.create_qp_builder();
+        let psn = random::generate_psn();
 
         let mut qp = builder
             .setup_max_inline_data(128)
@@ -112,7 +114,7 @@ impl<T: CommandContext> TestRunner<T> {
         attr.setup_state(QueuePairState::ReadyToReceive)
             .setup_path_mtu(Mtu::Mtu4096)
             .setup_dest_qp_num(qp.qp_number())
-            .setup_rq_psn(random::generate_psn())
+            .setup_rq_psn(psn)
             .setup_max_dest_read_atomic(0)
             .setup_min_rnr_timer(0);
         let mut ah_attr = AddressHandleAttribute::new();
@@ -129,7 +131,7 @@ impl<T: CommandContext> TestRunner<T> {
 
         let mut attr = QueuePairAttribute::new();
         attr.setup_state(QueuePairState::ReadyToSend)
-            .setup_sq_psn(random::generate_psn())
+            .setup_sq_psn(psn)
             .setup_timeout(12)
             .setup_retry_cnt(7)
             .setup_rnr_retry(7)
@@ -202,7 +204,7 @@ impl<T: CommandContext> TestRunner<T> {
             msg_rate: (cur_iter as f64) / time.as_secs_f64() / 1_000_000.0,
             time: format!("{:.2}", time.as_secs_f64()),
         };
-        display.set_results(results);
+        display.set_bandwidth_results(results);
 
         display.display();
         Ok(())
