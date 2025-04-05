@@ -17,12 +17,36 @@ pub const SIZE_COLUMN_WIDTH: usize = 12;
 pub const ITERATIONS_COLUMN_WIDTH: usize = 12;
 pub const BANDWIDTH_COLUMN_WIDTH: usize = 18;
 pub const MSG_RATE_COLUMN_WIDTH: usize = 18;
-pub const SEPARATOR_WIDTH: usize = 3;  // Width of a single separator character
-pub const COLUMN_COUNT: usize = 5;     // Total number of columns
+pub const SEPARATOR_WIDTH: usize = 3; // Width of a single separator character
+pub const COLUMN_COUNT: usize = 5; // Total number of columns
 pub const START_AND_END_SPACES_WIDTH: usize = 2; // Width of start and end spaces
 
 // Latency column widths
 pub const LATENCY_COLUMN_WIDTH: usize = 18;
+pub const LAT_SIZE_WIDTH: usize = 8;
+pub const LAT_ITER_WIDTH: usize = 12;
+pub const LAT_MIN_WIDTH: usize = 14;
+pub const LAT_MAX_WIDTH: usize = 14;
+pub const LAT_TYP_WIDTH: usize = 16;
+pub const LAT_AVG_WIDTH: usize = 14;
+pub const LAT_STDEV_WIDTH: usize = 15;
+pub const LAT_P99_WIDTH: usize = 12;
+pub const LAT_P999_WIDTH: usize = 16;
+
+// Function to get the minimum width required for latency table
+pub fn min_latency_table_width() -> usize {
+    LAT_SIZE_WIDTH
+        + LAT_ITER_WIDTH
+        + LAT_MIN_WIDTH
+        + LAT_MAX_WIDTH
+        + LAT_TYP_WIDTH
+        + LAT_AVG_WIDTH
+        + LAT_STDEV_WIDTH
+        + LAT_P99_WIDTH
+        + LAT_P999_WIDTH
+        + (SEPARATOR_WIDTH * 8)
+        + DEFAULT_HEADER_MARGIN_LEN // 8 separators for 9 columns
+}
 
 macro_rules! header_width {
     () => {
@@ -246,14 +270,22 @@ impl DisplayOutput {
 
         println!(
             "{}",
-            create_header("Connection Details", header_width!(), DEFAULT_HEADER_MARGIN_LEN)
+            create_header(
+                "Connection Details",
+                header_width!(),
+                DEFAULT_HEADER_MARGIN_LEN
+            )
         );
         println!("{}\n", self.format_qp_details());
 
         if let Some(results) = &self.bw_results {
             println!(
                 "{}",
-                create_header("Bandwidth Results", header_width!(), DEFAULT_HEADER_MARGIN_LEN)
+                create_header(
+                    "Bandwidth Results",
+                    header_width!(),
+                    DEFAULT_HEADER_MARGIN_LEN
+                )
             );
 
             // Ensure our header width can accommodate the table
@@ -269,9 +301,12 @@ impl DisplayOutput {
             );
 
             // Calculate remaining width for the last column
-            let defined_width = SIZE_COLUMN_WIDTH + ITERATIONS_COLUMN_WIDTH +
-                                BANDWIDTH_COLUMN_WIDTH + MSG_RATE_COLUMN_WIDTH +
-                                (SEPARATOR_WIDTH * (COLUMN_COUNT - 1)) + START_AND_END_SPACES_WIDTH;
+            let defined_width = SIZE_COLUMN_WIDTH
+                + ITERATIONS_COLUMN_WIDTH
+                + BANDWIDTH_COLUMN_WIDTH
+                + MSG_RATE_COLUMN_WIDTH
+                + (SEPARATOR_WIDTH * (COLUMN_COUNT - 1))
+                + START_AND_END_SPACES_WIDTH;
 
             let remaining_width = table_width.saturating_sub(defined_width);
 
@@ -300,7 +335,11 @@ impl DisplayOutput {
         if let Some(results) = &self.lat_results {
             println!(
                 "{}",
-                create_header("Latency Results", header_width!(), DEFAULT_HEADER_MARGIN_LEN)
+                create_header(
+                    "Latency Results",
+                    header_width!(),
+                    DEFAULT_HEADER_MARGIN_LEN
+                )
             );
 
             let mut table = Table::new([results])

@@ -5,13 +5,17 @@ use crate::cli::perf::{CommonArgs, SendBandwidthArgs};
 #[derive(Debug, Clone)]
 pub struct BaseParams {
     device: Option<String>,
-    gid_index: Option<u32>,
+    gid_index: Option<u8>,
     iterations: u32,
     message_size: u32,
     qp_timeout: u8,
     tx_depth: Option<u32>,
     rx_depth: Option<u32>,
     use_imm_data: bool,
+    server_mode: bool,       // New field
+    address: Option<String>, // New field
+    port: u16,               // New field
+    qp_count: usize,         // New field
 }
 
 impl Default for BaseParams {
@@ -25,6 +29,10 @@ impl Default for BaseParams {
             tx_depth: None,
             rx_depth: None,
             use_imm_data: false,
+            server_mode: false,
+            address: None,
+            port: 18515,
+            qp_count: 1,
         }
     }
 }
@@ -50,6 +58,15 @@ impl SendBandwidthParams {
             params.set_rx_depth(rx_depth);
         }
         params.set_use_immediate_data(args.imm_data);
+
+        // New parameters
+        params.set_server_mode(args.common.server);
+        if let Some(addr) = &args.common.address {
+            params.set_address(addr.clone());
+        }
+        params.set_port(args.common.port);
+        params.set_qp_count(args.common.qp_count as usize);
+
         params
     }
 
@@ -63,6 +80,10 @@ impl SendBandwidthParams {
         self.set_iterations(args.iters);
         self.set_message_size(args.msg_size);
         self.set_qp_timeout(args.qp_timeout);
+        self.base.server_mode = args.server;
+        self.base.address = args.address.clone();
+        self.base.port = args.port;
+        self.base.qp_count = args.qp_count as usize;
     }
 }
 
@@ -75,11 +96,11 @@ impl CommandContext for SendBandwidthParams {
         self.base.device = Some(device);
     }
 
-    fn gid_index(&self) -> Option<u32> {
+    fn gid_index(&self) -> Option<u8> {
         self.base.gid_index
     }
 
-    fn set_gid_index(&mut self, index: u32) {
+    fn set_gid_index(&mut self, index: u8) {
         self.base.gid_index = Some(index);
     }
 
@@ -134,6 +155,38 @@ impl CommandContext for SendBandwidthParams {
     fn operation_name(&self) -> String {
         "SEND bandwidth test".to_string()
     }
+
+    fn server_mode(&self) -> Option<bool> {
+        Some(self.base.server_mode)
+    }
+
+    fn set_server_mode(&mut self, is_server: bool) {
+        self.base.server_mode = is_server;
+    }
+
+    fn port(&self) -> Option<u16> {
+        Some(self.base.port)
+    }
+
+    fn set_port(&mut self, port: u16) {
+        self.base.port = port;
+    }
+
+    fn address(&self) -> Option<String> {
+        self.base.address.clone()
+    }
+
+    fn set_address(&mut self, address: String) {
+        self.base.address = Some(address);
+    }
+
+    fn qp_count(&self) -> Option<usize> {
+        Some(self.base.qp_count)
+    }
+
+    fn set_qp_count(&mut self, count: usize) {
+        self.base.qp_count = count;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +196,9 @@ pub struct SendLatencyParams {
 
 impl SendLatencyParams {
     pub fn new() -> Self {
-        Self { base: BaseParams::default() }
+        Self {
+            base: BaseParams::default(),
+        }
     }
 
     pub fn from_args(args: &crate::cli::perf::SendLatencyArgs) -> Self {
@@ -181,11 +236,11 @@ impl CommandContext for SendLatencyParams {
         self.base.device = Some(device);
     }
 
-    fn gid_index(&self) -> Option<u32> {
+    fn gid_index(&self) -> Option<u8> {
         self.base.gid_index
     }
 
-    fn set_gid_index(&mut self, index: u32) {
+    fn set_gid_index(&mut self, index: u8) {
         self.base.gid_index = Some(index);
     }
 
@@ -240,6 +295,37 @@ impl CommandContext for SendLatencyParams {
     fn operation_name(&self) -> String {
         "SEND latency test".to_string()
     }
+    fn server_mode(&self) -> Option<bool> {
+        Some(self.base.server_mode)
+    }
+
+    fn set_server_mode(&mut self, is_server: bool) {
+        self.base.server_mode = is_server;
+    }
+
+    fn port(&self) -> Option<u16> {
+        Some(self.base.port)
+    }
+
+    fn set_port(&mut self, port: u16) {
+        self.base.port = port;
+    }
+
+    fn address(&self) -> Option<String> {
+        self.base.address.clone()
+    }
+
+    fn set_address(&mut self, address: String) {
+        self.base.address = Some(address);
+    }
+
+    fn qp_count(&self) -> Option<usize> {
+        Some(self.base.qp_count)
+    }
+
+    fn set_qp_count(&mut self, count: usize) {
+        self.base.qp_count = count;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +345,15 @@ impl WriteBandwidthParams {
         params.set_from_common_args(&args.common);
         params.set_tx_depth(args.tx_depth);
         params.set_use_immediate_data(args.imm_data);
+
+        // New parameters
+        params.set_server_mode(args.common.server);
+        if let Some(addr) = &args.common.address {
+            params.set_address(addr.clone());
+        }
+        params.set_port(args.common.port);
+        params.set_qp_count(args.common.qp_count as usize);
+
         params
     }
 
@@ -272,6 +367,11 @@ impl WriteBandwidthParams {
         self.set_iterations(args.iters);
         self.set_message_size(args.msg_size);
         self.set_qp_timeout(args.qp_timeout);
+
+        self.base.server_mode = args.server;
+        self.base.address = args.address.clone();
+        self.base.port = args.port;
+        self.base.qp_count = args.qp_count as usize;
     }
 }
 
@@ -285,11 +385,11 @@ impl CommandContext for WriteBandwidthParams {
         self.base.device = Some(device);
     }
 
-    fn gid_index(&self) -> Option<u32> {
+    fn gid_index(&self) -> Option<u8> {
         self.base.gid_index
     }
 
-    fn set_gid_index(&mut self, index: u32) {
+    fn set_gid_index(&mut self, index: u8) {
         self.base.gid_index = Some(index);
     }
 
@@ -344,6 +444,38 @@ impl CommandContext for WriteBandwidthParams {
     fn operation_name(&self) -> String {
         "WRITE bandwidth test".to_string()
     }
+
+    fn server_mode(&self) -> Option<bool> {
+        Some(self.base.server_mode)
+    }
+
+    fn set_server_mode(&mut self, is_server: bool) {
+        self.base.server_mode = is_server;
+    }
+
+    fn port(&self) -> Option<u16> {
+        Some(self.base.port)
+    }
+
+    fn set_port(&mut self, port: u16) {
+        self.base.port = port;
+    }
+
+    fn address(&self) -> Option<String> {
+        self.base.address.clone()
+    }
+
+    fn set_address(&mut self, address: String) {
+        self.base.address = Some(address);
+    }
+
+    fn qp_count(&self) -> Option<usize> {
+        Some(self.base.qp_count)
+    }
+
+    fn set_qp_count(&mut self, count: usize) {
+        self.base.qp_count = count;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -353,7 +485,9 @@ pub struct WriteLatencyParams {
 
 impl WriteLatencyParams {
     pub fn new() -> Self {
-        Self { base: BaseParams::default() }
+        Self {
+            base: BaseParams::default(),
+        }
     }
 
     pub fn from_args(args: &crate::cli::perf::WriteLatencyArgs) -> Self {
@@ -389,11 +523,11 @@ impl CommandContext for WriteLatencyParams {
         self.base.device = Some(device);
     }
 
-    fn gid_index(&self) -> Option<u32> {
+    fn gid_index(&self) -> Option<u8> {
         self.base.gid_index
     }
 
-    fn set_gid_index(&mut self, index: u32) {
+    fn set_gid_index(&mut self, index: u8) {
         self.base.gid_index = Some(index);
     }
 
@@ -448,6 +582,38 @@ impl CommandContext for WriteLatencyParams {
     fn operation_name(&self) -> String {
         "WRITE latency test".to_string()
     }
+
+    fn server_mode(&self) -> Option<bool> {
+        Some(self.base.server_mode)
+    }
+
+    fn set_server_mode(&mut self, is_server: bool) {
+        self.base.server_mode = is_server;
+    }
+
+    fn port(&self) -> Option<u16> {
+        Some(self.base.port)
+    }
+
+    fn set_port(&mut self, port: u16) {
+        self.base.port = port;
+    }
+
+    fn address(&self) -> Option<String> {
+        self.base.address.clone()
+    }
+
+    fn set_address(&mut self, address: String) {
+        self.base.address = Some(address);
+    }
+
+    fn qp_count(&self) -> Option<usize> {
+        Some(self.base.qp_count)
+    }
+
+    fn set_qp_count(&mut self, count: usize) {
+        self.base.qp_count = count;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -457,7 +623,9 @@ pub struct ReadBandwidthParams {
 
 impl ReadBandwidthParams {
     pub fn new() -> Self {
-        Self { base: BaseParams::default() }
+        Self {
+            base: BaseParams::default(),
+        }
     }
 
     pub fn from_args(args: &crate::cli::perf::ReadBandwidthArgs) -> Self {
@@ -492,11 +660,11 @@ impl CommandContext for ReadBandwidthParams {
         self.base.device = Some(device);
     }
 
-    fn gid_index(&self) -> Option<u32> {
+    fn gid_index(&self) -> Option<u8> {
         self.base.gid_index
     }
 
-    fn set_gid_index(&mut self, index: u32) {
+    fn set_gid_index(&mut self, index: u8) {
         self.base.gid_index = Some(index);
     }
 
@@ -551,6 +719,38 @@ impl CommandContext for ReadBandwidthParams {
     fn operation_name(&self) -> String {
         "READ bandwidth test".to_string()
     }
+
+    fn server_mode(&self) -> Option<bool> {
+        Some(self.base.server_mode)
+    }
+
+    fn set_server_mode(&mut self, is_server: bool) {
+        self.base.server_mode = is_server;
+    }
+
+    fn port(&self) -> Option<u16> {
+        Some(self.base.port)
+    }
+
+    fn set_port(&mut self, port: u16) {
+        self.base.port = port;
+    }
+
+    fn address(&self) -> Option<String> {
+        self.base.address.clone()
+    }
+
+    fn set_address(&mut self, address: String) {
+        self.base.address = Some(address);
+    }
+
+    fn qp_count(&self) -> Option<usize> {
+        Some(self.base.qp_count)
+    }
+
+    fn set_qp_count(&mut self, count: usize) {
+        self.base.qp_count = count;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -560,7 +760,9 @@ pub struct ReadLatencyParams {
 
 impl ReadLatencyParams {
     pub fn new() -> Self {
-        Self { base: BaseParams::default() }
+        Self {
+            base: BaseParams::default(),
+        }
     }
 
     pub fn from_args(args: &crate::cli::perf::ReadLatencyArgs) -> Self {
@@ -595,11 +797,11 @@ impl CommandContext for ReadLatencyParams {
         self.base.device = Some(device);
     }
 
-    fn gid_index(&self) -> Option<u32> {
+    fn gid_index(&self) -> Option<u8> {
         self.base.gid_index
     }
 
-    fn set_gid_index(&mut self, index: u32) {
+    fn set_gid_index(&mut self, index: u8) {
         self.base.gid_index = Some(index);
     }
 
@@ -653,5 +855,37 @@ impl CommandContext for ReadLatencyParams {
 
     fn operation_name(&self) -> String {
         "READ latency test".to_string()
+    }
+
+    fn server_mode(&self) -> Option<bool> {
+        Some(self.base.server_mode)
+    }
+
+    fn set_server_mode(&mut self, is_server: bool) {
+        self.base.server_mode = is_server;
+    }
+
+    fn port(&self) -> Option<u16> {
+        Some(self.base.port)
+    }
+
+    fn set_port(&mut self, port: u16) {
+        self.base.port = port;
+    }
+
+    fn address(&self) -> Option<String> {
+        self.base.address.clone()
+    }
+
+    fn set_address(&mut self, address: String) {
+        self.base.address = Some(address);
+    }
+
+    fn qp_count(&self) -> Option<usize> {
+        Some(self.base.qp_count)
+    }
+
+    fn set_qp_count(&mut self, count: usize) {
+        self.base.qp_count = count;
     }
 }

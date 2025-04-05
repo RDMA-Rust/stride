@@ -1,5 +1,5 @@
-use clap::{Args, Parser, Subcommand};
 use crate::cli::context::CommandContext;
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "stride-perf")]
@@ -120,7 +120,7 @@ pub struct CommonArgs {
     pub device: Option<String>,
     /// Test uses GID with GID index taken from command
     #[arg(long, short = 'x')]
-    pub gid_index: Option<u32>,
+    pub gid_index: Option<u8>,
     /// Number of exchanges (at least 100)
     #[arg(long, short = 'n', default_value_t = 1000)]
     pub iters: u32,
@@ -130,4 +130,16 @@ pub struct CommonArgs {
     /// QP timeout = (4 us) * (2 ^ timeout)
     #[arg(long, short = 'u', default_value_t = 14)]
     pub qp_timeout: u8,
+    /// Run in server mode (listen for connections)
+    #[arg(long)]
+    pub server: bool,
+    /// Port number for connections
+    #[arg(long, short = 'p', default_value_t = 18515)]
+    pub port: u16,
+    /// Target address for client connections
+    #[arg(long, short = 'a', default_value = "127.0.0.1")]
+    pub address: Option<String>,
+    /// Number of queue pairs to use
+    #[arg(long, short = 'q', default_value_t = 1)]
+    pub qp_count: u32,
 }

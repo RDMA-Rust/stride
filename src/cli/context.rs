@@ -6,10 +6,10 @@ pub trait CommandContext {
     fn set_device(&mut self, device: String);
 
     /// Get the GID index
-    fn gid_index(&self) -> Option<u32>;
+    fn gid_index(&self) -> Option<u8>;
 
     /// Set the GID index
-    fn set_gid_index(&mut self, index: u32);
+    fn set_gid_index(&mut self, index: u8);
 
     /// Get the number of iterations
     fn iterations(&self) -> u32;
@@ -49,4 +49,44 @@ pub trait CommandContext {
 
     /// Create a descriptive name for this operation
     fn operation_name(&self) -> String;
+
+    /// Get whether this endpoint should act as a server
+    fn server_mode(&self) -> Option<bool> {
+        None
+    }
+
+    /// Set whether this endpoint should act as a server
+    fn set_server_mode(&mut self, is_server: bool) {
+        // Default implementation does nothing
+    }
+
+    /// Get the port number to listen on (server) or connect to (client)
+    fn port(&self) -> Option<u16> {
+        None
+    }
+
+    /// Set the port number
+    fn set_port(&mut self, port: u16) {
+        // Default implementation does nothing
+    }
+
+    /// Get the target address for client connections
+    fn address(&self) -> Option<String> {
+        None
+    }
+
+    /// Set the target address for client connections
+    fn set_address(&mut self, address: String) {
+        // Default implementation does nothing
+    }
+
+    /// Get the number of QPs to use
+    fn qp_count(&self) -> Option<usize> {
+        None
+    }
+
+    /// Set the number of QPs to use
+    fn set_qp_count(&mut self, count: usize) {
+        // Default implementation does nothing
+    }
 }

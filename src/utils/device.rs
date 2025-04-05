@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sideway::ibverbs::device_context::DeviceAttr;
 use sideway::ibverbs::device::DeviceInfo;
+use sideway::ibverbs::device_context::DeviceAttr;
 
 use super::device_ids::{
     lookup_vendor, AlibabaModel, AmazonModel, BroadcomModel, ChelsioModel, FunctionType,
@@ -57,7 +57,11 @@ impl DeviceDetail {
     }
 }
 
-pub fn probe_devices(detailed: bool, show_numa: bool, filter_device: Option<&str>) -> anyhow::Result<()> {
+pub fn probe_devices(
+    detailed: bool,
+    show_numa: bool,
+    filter_device: Option<&str>,
+) -> anyhow::Result<()> {
     let device_list = sideway::ibverbs::device::DeviceList::new()?;
 
     for device in &device_list {
