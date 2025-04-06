@@ -1,4 +1,4 @@
-use sideway::ibverbs::address::GidEntry;
+use sideway::ibverbs::address::Gid;
 use std::fmt::Display;
 use tabled::{
     settings::{object::Columns, Style, Width},
@@ -172,7 +172,7 @@ pub struct LatencyResult {
 pub struct DisplayOutput {
     config: TestConfiguration,
     qp_details: Vec<QueuePairDetail>,
-    gid_info: Vec<GidEntry>,
+    gid_info: Vec<Gid>,
     bw_results: Option<BandwidthResult>,
     lat_results: Option<LatencyResult>,
 }
@@ -212,7 +212,7 @@ impl DisplayOutput {
     pub fn new(
         config: TestConfiguration,
         qp_details: Vec<QueuePairDetail>,
-        gid_info: Vec<GidEntry>,
+        gid_info: Vec<Gid>,
     ) -> Self {
         Self {
             config,
@@ -242,16 +242,8 @@ impl DisplayOutput {
         }
 
         unsafe {
-            output.push_str(&format!(
-                "Local  GID: Index: {}, GID: {}\n",
-                self.gid_info.get(0).unwrap_unchecked().gid_index(),
-                self.gid_info.get(0).unwrap_unchecked().gid(),
-            ));
-            output.push_str(&format!(
-                "Remote GID: Index: {}, GID: {}",
-                self.gid_info.get(1).unwrap_unchecked().gid_index(),
-                self.gid_info.get(1).unwrap_unchecked().gid(),
-            ));
+            output.push_str(&format!("Local  GID: GID: {}\n", self.gid_info[0],));
+            output.push_str(&format!("Remote GID: GID: {}", self.gid_info[1],));
         }
 
         output

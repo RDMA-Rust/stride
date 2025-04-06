@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sideway::ibverbs::address::Gid;
 use sideway::ibverbs::device_context::{DeviceContext, Mtu};
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::{GenericQueuePair, QueuePair};
@@ -17,6 +18,8 @@ pub struct ConnectionSession<'a> {
     ctx: Arc<DeviceContext>,
     pd: Arc<ProtectionDomain<'a>>,
     local_gid_index: u8,
+    local_gid: Option<Gid>,
+    remote_gid: Option<Gid>,
 }
 
 impl<'a> ConnectionSession<'a> {
@@ -34,6 +37,8 @@ impl<'a> ConnectionSession<'a> {
             ctx,
             pd,
             local_gid_index: gid_index,
+            local_gid: None,
+            remote_gid: None,
         })
     }
 
@@ -95,14 +100,16 @@ impl<'a> ConnectionSession<'a> {
     }
 
     pub fn setup_queue_pair(
-        &self,
+        &mut self,
         qp: &mut GenericQueuePair<'_>,
     ) -> ConnectionResult<DestinationInfo> {
         // Prepare local QP data
         let local_data = self.prepare_local_qp_data(qp)?;
+        self.local_gid = Some(local_data.gid);
 
         // Setup QP with remote data
         let remote_data = self.manager.setup_qp(&self.ctx, &self.pd, qp, local_data)?;
+        self.remote_gid = Some(remote_data.gid);
 
         Ok(remote_data)
     }

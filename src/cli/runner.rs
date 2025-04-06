@@ -1,8 +1,9 @@
+use crate::connection::exchange::ConnectionSetupResult;
 use crate::connection::exchange::MemoryRegionInfo;
 use anyhow::Result;
 use byte_unit::{Byte, UnitType};
 use quanta::Clock;
-use sideway::ibverbs::address::AddressHandleAttribute;
+use sideway::ibverbs::address::{AddressHandleAttribute, Gid, GidEntry};
 use sideway::ibverbs::completion::{
     CreateCompletionQueueWorkCompletionFlags, GenericCompletionQueue, WorkCompletionStatus,
 };
@@ -47,7 +48,8 @@ impl<T: CommandContext> TestRunner<T> {
         pd: Arc<ProtectionDomain>,
         qps: &mut [GenericQueuePair],
         mr: &MemoryRegion,
-    ) -> Result<MemoryRegionInfo> {
+        qp_details: &mut [QueuePairDetail],
+    ) -> Result<ConnectionSetupResult> {
         let gid_index = self.params.gid_index().unwrap_or(0);
         let server_mode = self.params.server_mode().unwrap_or(false);
 
@@ -85,18 +87,31 @@ impl<T: CommandContext> TestRunner<T> {
 
         println!("Establishing connection via {}", address);
         session.establish_connection(&address)?;
+        let actual_mtu = 4096;
+
+        let local_gid = ctx.query_gid_ex(1, gid_index as u32)?.gid();
+        let mut remote_gid = Gid::default();
 
         // Setup each queue pair
         println!("Setting up {} queue pairs", qps.len());
-        for (i, qp) in qps.iter_mut().enumerate() {
+        for (i, (qp, detail)) in qps.iter_mut().zip(qp_details.iter_mut()).enumerate() {
             println!("Setting up QP #{}", i);
+            // Store local PSN before exchange
+            let local_psn = detail.local_psn;
+
+            // Setup the QP
             let remote_data = session.setup_queue_pair(qp)?;
+            remote_gid = remote_data.gid;
+
+            // Update QP details with actual exchanged values
+            detail.local_qpn = qp.qp_number();
+            detail.local_psn = local_psn;
+            detail.remote_qpn = remote_data.qp_number;
+            detail.remote_psn = remote_data.psn;
+
             println!(
                 "QP #{} setup complete: Local QPN: 0x{:x}, Remote QPN: 0x{:x}, Remote PSN: 0x{:x}",
-                i,
-                qp.qp_number(),
-                remote_data.qp_number,
-                remote_data.psn
+                i, detail.local_qpn, detail.remote_qpn, detail.remote_psn
             );
         }
 
@@ -111,7 +126,12 @@ impl<T: CommandContext> TestRunner<T> {
         println!("Connection setup complete, closing control connection");
         session.close()?;
 
-        Ok(remote_mr)
+        Ok(ConnectionSetupResult {
+            remote_mr,
+            local_gid,
+            remote_gid,
+            actual_mtu,
+        })
     }
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -174,10 +194,8 @@ impl<T: CommandContext> TestRunner<T> {
             });
         }
 
-        let gid_info = vec![gid, gid_2];
-        let mut display = DisplayOutput::new(config, qp_details, gid_info);
-
-        let memory = SystemMemory::new(tx_depth as usize * msg_size as usize, None)?;
+        let buffer_size = tx_depth as usize * msg_size as usize * qp_count;
+        let memory = SystemMemory::new(buffer_size, None)?;
         let pd = Arc::new(ctx.alloc_pd()?);
         let mr = unsafe {
             pd.reg_mr(
@@ -187,12 +205,11 @@ impl<T: CommandContext> TestRunner<T> {
             )?
         };
 
-        // println!("MR registered {:#?}", mr);
-
+        let cq_depth = tx_depth as u32 * qp_count as u32;
         let cq: GenericCompletionQueue = ctx
             .create_cq_builder()
             .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
-            .setup_cqe(512)
+            .setup_cqe(cq_depth)
             .build_ex()?
             .into();
 
@@ -208,54 +225,28 @@ impl<T: CommandContext> TestRunner<T> {
                 .setup_max_inline_data(128)
                 .setup_send_cq(&cq)
                 .setup_recv_cq(&cq)
-                .setup_max_send_wr(512)
+                .setup_max_send_wr(tx_depth)
                 .setup_max_recv_wr(512)
                 .build_ex()?;
 
             qps.push(qp.into());
         }
 
-        let remote_mr = self
-            .setup_connection(ctx.clone(), pd.clone(), &mut qps, &mr)
+        let conn_result = self
+            .setup_connection(ctx.clone(), pd.clone(), &mut qps, &mr, &mut qp_details)
             .unwrap();
 
-        // let mut attr = QueuePairAttribute::new();
-        // attr.setup_state(QueuePairState::Init)
-        //     .setup_pkey_index(0)
-        //     .setup_port(1)
-        //     .setup_access_flags(AccessFlags::LocalWrite | AccessFlags::RemoteWrite);
-        // qp.modify(&attr)?;
-
-        // let mut attr = QueuePairAttribute::new();
-        // attr.setup_state(QueuePairState::ReadyToReceive)
-        //     .setup_path_mtu(Mtu::Mtu4096)
-        //     .setup_dest_qp_num(qp.qp_number())
-        //     .setup_rq_psn(psn)
-        //     .setup_max_dest_read_atomic(0)
-        //     .setup_min_rnr_timer(0);
-        // let mut ah_attr = AddressHandleAttribute::new();
-
-        // ah_attr
-        //     .setup_dest_lid(1)
-        //     .setup_port(1)
-        //     .setup_service_level(42)
-        //     .setup_grh_src_gid_index(0)
-        //     .setup_grh_dest_gid(&ctx.query_gid(1, 0)?)
-        //     .setup_grh_hop_limit(255);
-        // attr.setup_address_vector(&ah_attr);
-        // qp.modify(&attr)?;
-
-        // let mut attr = QueuePairAttribute::new();
-        // attr.setup_state(QueuePairState::ReadyToSend)
-        //     .setup_sq_psn(psn)
-        //     .setup_timeout(12)
-        //     .setup_retry_cnt(7)
-        //     .setup_rnr_retry(7)
-        //     .setup_max_read_atomic(0);
-        // qp.modify(&attr)?;
+        let gid_info = vec![conn_result.local_gid, conn_result.remote_gid];
+        let mut display = DisplayOutput::new(config, qp_details, gid_info);
 
         let mut cur_iter: u32 = 0;
         let mut inflight = 0;
+        let remote_mr = conn_result.remote_mr;
+
+        let iterations_per_qp = iterations;
+        let mut qp_iterations = vec![0u32; qp_count];
+        let mut inflight_per_qp = vec![0u32; qp_count];
+        let total_target_iterations = iterations_per_qp * qp_count as u32;
 
         let clock = Clock::new();
         let start_time = clock.now();
@@ -263,68 +254,122 @@ impl<T: CommandContext> TestRunner<T> {
         // Execute the test based on operation type
         let is_write = self.params.operation_name().contains("WRITE");
 
-        while cur_iter < iterations {
-            while inflight < tx_depth {
-                let mut guard = qps[0].start_post_send();
+        let mut all_completed = false;
 
-                let offset = (cur_iter % tx_depth) as usize * msg_size as usize;
-                let addr = mr.get_ptr() as u64 + offset as u64;
-
-                let send_handle = if is_write {
-                    // Use remote memory information for WRITE operations
-                    let remote_offset = offset % remote_mr.size;
-                    let remote_addr = remote_mr.addr + remote_offset as u64;
-                    guard
-                        .construct_wr(cur_iter as _, WorkRequestFlags::Signaled)
-                        .setup_write(remote_mr.rkey, remote_addr)
-                } else {
-                    guard
-                        .construct_wr(cur_iter as _, WorkRequestFlags::Signaled)
-                        .setup_send()
-                };
-
-                unsafe {
-                    send_handle.setup_sge(mr.lkey(), addr, msg_size);
+        while !all_completed {
+            // Post operations to all QPs that have space in their queue
+            for qp_idx in 0..qp_count {
+                // Skip if this QP has completed all iterations
+                if qp_iterations[qp_idx] >= iterations_per_qp {
+                    continue;
                 }
 
-                guard.post()?;
+                // Post operations until tx_depth is reached or iterations are complete
+                while inflight_per_qp[qp_idx] < tx_depth
+                    && qp_iterations[qp_idx] < iterations_per_qp
+                {
+                    let mut guard = qps[qp_idx].start_post_send();
 
-                cur_iter += 1;
-                inflight += 1;
+                    // Calculate buffer offset - each QP has its own buffer region
+                    let buffer_region_size = tx_depth as usize * msg_size as usize;
+                    let qp_offset = qp_idx * buffer_region_size;
+                    let iter_offset =
+                        (qp_iterations[qp_idx] % tx_depth) as usize * msg_size as usize;
+                    let total_offset = qp_offset + iter_offset;
+
+                    let local_addr = mr.get_ptr() as u64 + total_offset as u64;
+
+                    let wr_id = ((qp_idx as u64) << 32) | (qp_iterations[qp_idx] as u64);
+                    // For WRITE operations, use remote memory info
+                    let send_handle = if is_write {
+                        // Remote memory layout should match local layout
+                        let remote_offset = total_offset % conn_result.remote_mr.size;
+                        let remote_addr = remote_mr.addr + remote_offset as u64;
+
+                        guard
+                            .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                            .setup_write(remote_mr.rkey, remote_addr)
+                    } else {
+                        guard
+                            .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                            .setup_send()
+                    };
+
+                    // Setup scatter-gather entry
+                    unsafe {
+                        send_handle.setup_sge(mr.lkey(), local_addr, msg_size);
+                    }
+
+                    guard.post()?;
+
+                    qp_iterations[qp_idx] += 1;
+                    inflight_per_qp[qp_idx] += 1;
+                }
             }
 
             match cq.start_poll() {
                 Ok(mut poller) => {
                     while let Some(wc) = poller.next() {
-                        if wc.status() != WorkCompletionStatus::Success as u32 {
+                        // Extract QP index from high 32 bits of wr_id
+                        let wr_id = wc.wr_id();
+                        let qp_idx = (wr_id >> 32) as usize;
+                        let iter_num = (wr_id & 0xFFFFFFFF) as u32;
+
+                        if qp_idx < qp_count {
+                            if wc.status() != WorkCompletionStatus::Success as u32 {
+                                return Err(format!(
+                                    "QP #{}: Failed status {:#?} ({}) for iteration {}",
+                                    qp_idx,
+                                    Into::<WorkCompletionStatus>::into(wc.status()),
+                                    wc.status(),
+                                    iter_num
+                                )
+                                .into());
+                            }
+
+                            inflight_per_qp[qp_idx] -= 1;
+                        } else {
                             return Err(format!(
-                                "Failed status {:#?} ({}) for wr_id {}",
-                                Into::<WorkCompletionStatus>::into(wc.status()),
-                                wc.status(),
-                                wc.wr_id()
+                                "Invalid QP index {} decoded from wr_id {}",
+                                qp_idx, wr_id
                             )
                             .into());
                         }
-                        inflight -= 1;
                     }
                 }
-                Err(_) => continue,
+                Err(_) => std::thread::yield_now(), // Avoid busy-waiting
+            }
+
+            all_completed = true;
+            for qp_idx in 0..qp_count {
+                if qp_iterations[qp_idx] < iterations_per_qp || inflight_per_qp[qp_idx] > 0 {
+                    all_completed = false;
+                    break;
+                }
             }
         }
 
         let end_time = clock.now();
         let time = end_time.duration_since(start_time);
-        let bytes = msg_size as u64 * cur_iter as u64;
-        let bytes_per_second = bytes as f64 / time.as_secs_f64();
+
+        let total_iterations: u32 = qp_iterations.iter().sum();
+        assert_eq!(
+            total_iterations, total_target_iterations,
+            "Iteration count mismatch: expected {}, got {}",
+            total_target_iterations, total_iterations
+        );
+
+        let total_bytes = msg_size as u64 * total_iterations as u64;
+        let bytes_per_second = total_bytes as f64 / time.as_secs_f64();
 
         let results = BandwidthResult {
             size: msg_size,
-            iterations: cur_iter,
+            iterations: total_iterations,
             bandwidth: Byte::from_f64(bytes_per_second)
                 .unwrap()
                 .get_appropriate_unit(UnitType::Binary)
                 .get_value(),
-            msg_rate: (cur_iter as f64) / time.as_secs_f64() / 1_000_000.0,
+            msg_rate: (total_iterations as f64) / time.as_secs_f64() / 1_000_000.0,
             time: format!("{:.2}", time.as_secs_f64()),
         };
         display.set_bandwidth_results(results);

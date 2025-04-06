@@ -19,3 +19,10 @@ pub struct MemoryRegionInfo {
     pub rkey: u32,   // Remote key for accessing the memory
     pub size: usize, // Size of the memory region
 }
+
+pub struct ConnectionSetupResult {
+    pub remote_mr: MemoryRegionInfo,
+    pub local_gid: Gid,
+    pub remote_gid: Gid,
+    pub actual_mtu: u32,
+}
