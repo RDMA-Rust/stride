@@ -337,7 +337,7 @@ impl<T: CommandContext> TestRunner<T> {
                         }
                     }
                 }
-                Err(_) => std::thread::yield_now(), // Avoid busy-waiting
+                Err(_) => {}
             }
 
             all_completed = true;
