@@ -7,6 +7,7 @@ pub mod types;
 use self::message::{DeserializeMessage, Message};
 use crate::connection::exchange::DestinationInfo;
 use crate::connection::exchange::MemoryRegionInfo;
+use exchange::TestResults;
 use sideway::ibverbs::device_context::DeviceContext;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::GenericQueuePair;
@@ -96,6 +97,12 @@ pub trait ConnectionManager: Send + Sync {
 
     /// Exchange QP information with peer
     fn exchange_qp_info(&self, local: DestinationInfo) -> Result<DestinationInfo, ConnectionError>;
+
+    fn exchange_results(&self, local_results: TestResults) -> ConnectionResult<TestResults>;
+
+    fn receive_results(&self) -> ConnectionResult<TestResults>;
+
+    fn send_results(&self, results: &TestResults) -> ConnectionResult<()>;
 
     /// Exchange memory region information with peer
     fn exchange_memory_regions(

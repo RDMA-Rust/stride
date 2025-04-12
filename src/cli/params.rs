@@ -15,6 +15,7 @@ pub struct BaseParams {
     address: Option<String>,
     port: u16,
     qp_count: usize,
+    bidirectional: bool,
 }
 
 impl Default for BaseParams {
@@ -31,6 +32,7 @@ impl Default for BaseParams {
             address: None,
             port: 18515,
             qp_count: 1,
+            bidirectional: false,
         }
     }
 }
@@ -63,6 +65,7 @@ impl SendBandwidthParams {
         }
         params.set_port(args.common.port);
         params.set_qp_count(args.common.qp_count as usize);
+        params.base.bidirectional = args.common.bidirectional;
 
         params
     }
@@ -152,14 +155,6 @@ impl CommandContext for SendBandwidthParams {
         "SEND bandwidth test".to_string()
     }
 
-    fn server_mode(&self) -> Option<bool> {
-        Some(self.base.server_mode)
-    }
-
-    fn set_server_mode(&mut self, is_server: bool) {
-        self.base.server_mode = is_server;
-    }
-
     fn port(&self) -> Option<u16> {
         Some(self.base.port)
     }
@@ -182,6 +177,10 @@ impl CommandContext for SendBandwidthParams {
 
     fn set_qp_count(&mut self, count: usize) {
         self.base.qp_count = count;
+    }
+
+    fn bidirectional(&self) -> bool {
+        self.base.bidirectional
     }
 }
 
@@ -315,6 +314,10 @@ impl CommandContext for SendLatencyParams {
     fn set_qp_count(&mut self, count: usize) {
         self.base.qp_count = count;
     }
+
+    fn bidirectional(&self) -> bool {
+        self.base.bidirectional
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +344,7 @@ impl WriteBandwidthParams {
         }
         params.set_port(args.common.port);
         params.set_qp_count(args.common.qp_count as usize);
+        params.base.bidirectional = args.common.bidirectional;
 
         params
     }
@@ -454,6 +458,10 @@ impl CommandContext for WriteBandwidthParams {
 
     fn set_qp_count(&mut self, count: usize) {
         self.base.qp_count = count;
+    }
+
+    fn bidirectional(&self) -> bool {
+        self.base.bidirectional
     }
 }
 
@@ -585,6 +593,10 @@ impl CommandContext for WriteLatencyParams {
     fn set_qp_count(&mut self, count: usize) {
         self.base.qp_count = count;
     }
+
+    fn bidirectional(&self) -> bool {
+        self.base.bidirectional
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -714,6 +726,10 @@ impl CommandContext for ReadBandwidthParams {
     fn set_qp_count(&mut self, count: usize) {
         self.base.qp_count = count;
     }
+
+    fn bidirectional(&self) -> bool {
+        self.base.bidirectional
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -842,5 +858,9 @@ impl CommandContext for ReadLatencyParams {
 
     fn set_qp_count(&mut self, count: usize) {
         self.base.qp_count = count;
+    }
+
+    fn bidirectional(&self) -> bool {
+        self.base.bidirectional
     }
 }

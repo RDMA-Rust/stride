@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cli::context::CommandContext;
+use crate::connection::exchange::TestResults;
 use crate::connection::session::ConnectionSession;
 use crate::connection::ConnectionParams;
 use crate::connection::EndpointRole;
@@ -42,14 +43,14 @@ impl<T: CommandContext> TestRunner<T> {
         Self { params }
     }
 
-    fn setup_connection(
+    fn setup_connection<'a>(
         &self,
         ctx: Arc<DeviceContext>,
-        pd: Arc<ProtectionDomain>,
+        pd: Arc<ProtectionDomain<'a>>,
         qps: &mut [GenericQueuePair],
         mr: &MemoryRegion,
         qp_details: &mut [QueuePairDetail],
-    ) -> Result<ConnectionSetupResult> {
+    ) -> Result<(ConnectionSetupResult, ConnectionSession<'a>)> {
         let gid_index = self.params.gid_index().unwrap_or(0);
         let server_mode = self.params.server_mode();
 
@@ -125,16 +126,19 @@ impl<T: CommandContext> TestRunner<T> {
         session.synchronize_qps()?;
 
         // Close connection
-        println!("Connection setup complete, closing control connection");
-        session.close()?;
+        // println!("Connection setup complete, closing control connection");
+        // session.close()?;
 
-        Ok(ConnectionSetupResult {
-            remote_mr,
-            gid_type,
-            local_gid,
-            remote_gid,
-            actual_mtu,
-        })
+        Ok((
+            ConnectionSetupResult {
+                remote_mr,
+                gid_type,
+                local_gid,
+                remote_gid,
+                actual_mtu,
+            },
+            session,
+        ))
     }
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -202,14 +206,11 @@ impl<T: CommandContext> TestRunner<T> {
             .into();
 
         let mut builder = pd.create_qp_builder();
-        let psn = random::generate_psn();
-
         let qp_count = self.params.qp_count().unwrap_or(1);
         let mut qps: Vec<GenericQueuePair> = Vec::with_capacity(qp_count);
 
         for _ in 0..qp_count {
-            let mut builder = pd.create_qp_builder();
-            let mut qp = builder
+            let qp = builder
                 .setup_max_inline_data(128)
                 .setup_send_cq(&cq)
                 .setup_recv_cq(&cq)
@@ -220,18 +221,18 @@ impl<T: CommandContext> TestRunner<T> {
             qps.push(qp.into());
         }
 
-        let conn_result = self
+        let (conn_result, mut session) = self
             .setup_connection(ctx.clone(), pd.clone(), &mut qps, &mr, &mut qp_details)
             .unwrap();
 
         // Create test configuration
         let config = TestConfiguration {
             device: ctx.name(),
-            transport: "IB".to_string(),
+            transport: ctx.transport_type().to_string(),
             qp_count: qp_count as u32,
             connection_type: "RC".to_string(),
             mtu: conn_result.actual_mtu,
-            gid_type: format!("{:?}", gid.gid_type()),
+            gid_type: format!("{:?}", conn_result.gid_type),
             rx_depth: self.params.rx_depth().unwrap_or(512),
             tx_depth,
             test_type,
@@ -240,6 +241,8 @@ impl<T: CommandContext> TestRunner<T> {
         let gid_info = vec![conn_result.local_gid, conn_result.remote_gid];
         let mut display = DisplayOutput::new(config, qp_details, gid_info);
 
+        let is_server = self.params.server_mode();
+        let is_bidirectional = self.params.bidirectional();
         let mut cur_iter: u32 = 0;
         let mut inflight = 0;
         let remote_mr = conn_result.remote_mr;
@@ -252,131 +255,172 @@ impl<T: CommandContext> TestRunner<T> {
         let clock = Clock::new();
         let start_time = clock.now();
 
-        // Execute the test based on operation type
-        let is_write = self.params.operation_name().contains("WRITE");
+        if is_bidirectional || !is_server {
+            let clock = Clock::new();
+            let start_time = clock.now();
 
-        let mut all_completed = false;
+            // Execute the test based on operation type
+            let is_write = self.params.operation_name().contains("WRITE");
 
-        while !all_completed {
-            // Post operations to all QPs that have space in their queue
-            for qp_idx in 0..qp_count {
-                // Skip if this QP has completed all iterations
-                if qp_iterations[qp_idx] >= iterations_per_qp {
-                    continue;
-                }
+            let mut all_completed = false;
 
-                // Post operations until tx_depth is reached or iterations are complete
-                while inflight_per_qp[qp_idx] < tx_depth
-                    && qp_iterations[qp_idx] < iterations_per_qp
-                {
-                    let mut guard = qps[qp_idx].start_post_send();
-
-                    // Calculate buffer offset - each QP has its own buffer region
-                    let buffer_region_size = tx_depth as usize * msg_size as usize;
-                    let qp_offset = qp_idx * buffer_region_size;
-                    let iter_offset =
-                        (qp_iterations[qp_idx] % tx_depth) as usize * msg_size as usize;
-                    let total_offset = qp_offset + iter_offset;
-
-                    let local_addr = mr.get_ptr() as u64 + total_offset as u64;
-
-                    let wr_id = ((qp_idx as u64) << 32) | (qp_iterations[qp_idx] as u64);
-                    // For WRITE operations, use remote memory info
-                    let send_handle = if is_write {
-                        // Remote memory layout should match local layout
-                        let remote_offset = total_offset % conn_result.remote_mr.size;
-                        let remote_addr = remote_mr.addr + remote_offset as u64;
-
-                        guard
-                            .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                            .setup_write(remote_mr.rkey, remote_addr)
-                    } else {
-                        guard
-                            .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                            .setup_send()
-                    };
-
-                    // Setup scatter-gather entry
-                    unsafe {
-                        send_handle.setup_sge(mr.lkey(), local_addr, msg_size);
+            while !all_completed {
+                // Post operations to all QPs that have space in their queue
+                for qp_idx in 0..qp_count {
+                    // Skip if this QP has completed all iterations
+                    if qp_iterations[qp_idx] >= iterations_per_qp {
+                        continue;
                     }
 
-                    guard.post()?;
+                    // Post operations until tx_depth is reached or iterations are complete
+                    while inflight_per_qp[qp_idx] < tx_depth
+                        && qp_iterations[qp_idx] < iterations_per_qp
+                    {
+                        let mut guard = qps[qp_idx].start_post_send();
 
-                    qp_iterations[qp_idx] += 1;
-                    inflight_per_qp[qp_idx] += 1;
+                        // Calculate buffer offset - each QP has its own buffer region
+                        let buffer_region_size = tx_depth as usize * msg_size as usize;
+                        let qp_offset = qp_idx * buffer_region_size;
+                        let iter_offset =
+                            (qp_iterations[qp_idx] % tx_depth) as usize * msg_size as usize;
+                        let total_offset = qp_offset + iter_offset;
+
+                        let local_addr = mr.get_ptr() as u64 + total_offset as u64;
+
+                        let wr_id = ((qp_idx as u64) << 32) | (qp_iterations[qp_idx] as u64);
+                        // For WRITE operations, use remote memory info
+                        let send_handle = if is_write {
+                            // Remote memory layout should match local layout
+                            let remote_offset = total_offset % conn_result.remote_mr.size;
+                            let remote_addr = remote_mr.addr + remote_offset as u64;
+
+                            guard
+                                .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                                .setup_write(remote_mr.rkey, remote_addr)
+                        } else {
+                            guard
+                                .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                                .setup_send()
+                        };
+
+                        // Setup scatter-gather entry
+                        unsafe {
+                            send_handle.setup_sge(mr.lkey(), local_addr, msg_size);
+                        }
+
+                        guard.post()?;
+
+                        qp_iterations[qp_idx] += 1;
+                        inflight_per_qp[qp_idx] += 1;
+                    }
                 }
-            }
 
-            match cq.start_poll() {
-                Ok(mut poller) => {
-                    while let Some(wc) = poller.next() {
-                        // Extract QP index from high 32 bits of wr_id
-                        let wr_id = wc.wr_id();
-                        let qp_idx = (wr_id >> 32) as usize;
-                        let iter_num = (wr_id & 0xFFFFFFFF) as u32;
+                match cq.start_poll() {
+                    Ok(mut poller) => {
+                        while let Some(wc) = poller.next() {
+                            // Extract QP index from high 32 bits of wr_id
+                            let wr_id = wc.wr_id();
+                            let qp_idx = (wr_id >> 32) as usize;
+                            let iter_num = (wr_id & 0xFFFFFFFF) as u32;
 
-                        if qp_idx < qp_count {
-                            if wc.status() != WorkCompletionStatus::Success as u32 {
+                            if qp_idx < qp_count {
+                                if wc.status() != WorkCompletionStatus::Success as u32 {
+                                    return Err(format!(
+                                        "QP #{}: Failed status {:#?} ({}) for iteration {}",
+                                        qp_idx,
+                                        Into::<WorkCompletionStatus>::into(wc.status()),
+                                        wc.status(),
+                                        iter_num
+                                    )
+                                    .into());
+                                }
+
+                                inflight_per_qp[qp_idx] -= 1;
+                            } else {
                                 return Err(format!(
-                                    "QP #{}: Failed status {:#?} ({}) for iteration {}",
-                                    qp_idx,
-                                    Into::<WorkCompletionStatus>::into(wc.status()),
-                                    wc.status(),
-                                    iter_num
+                                    "Invalid QP index {} decoded from wr_id {}",
+                                    qp_idx, wr_id
                                 )
                                 .into());
                             }
-
-                            inflight_per_qp[qp_idx] -= 1;
-                        } else {
-                            return Err(format!(
-                                "Invalid QP index {} decoded from wr_id {}",
-                                qp_idx, wr_id
-                            )
-                            .into());
                         }
                     }
+                    Err(_) => {}
                 }
-                Err(_) => {}
+
+                all_completed = true;
+                for qp_idx in 0..qp_count {
+                    if qp_iterations[qp_idx] < iterations_per_qp || inflight_per_qp[qp_idx] > 0 {
+                        all_completed = false;
+                        break;
+                    }
+                }
             }
 
-            all_completed = true;
-            for qp_idx in 0..qp_count {
-                if qp_iterations[qp_idx] < iterations_per_qp || inflight_per_qp[qp_idx] > 0 {
-                    all_completed = false;
-                    break;
-                }
+            let end_time = clock.now();
+            let time = end_time.duration_since(start_time);
+
+            let total_iterations: u32 = qp_iterations.iter().sum();
+            assert_eq!(
+                total_iterations, total_target_iterations,
+                "Iteration count mismatch: expected {}, got {}",
+                total_target_iterations, total_iterations
+            );
+
+            let total_bytes = msg_size as u64 * total_iterations as u64;
+            let bytes_per_second = total_bytes as f64 / time.as_secs_f64();
+
+            let results = BandwidthResult {
+                size: msg_size,
+                iterations: total_iterations,
+                bandwidth: Byte::from_f64(bytes_per_second)
+                    .unwrap()
+                    .get_appropriate_unit(UnitType::Binary)
+                    .get_value(),
+                msg_rate: (total_iterations as f64) / time.as_secs_f64() / 1_000_000.0,
+                time: format!("{:.2}", time.as_secs_f64()),
+            };
+
+            // If client in unidirectional mode, send results to server
+            if !is_bidirectional && !is_server {
+                // Convert BandwidthResult to TestResults
+                let test_results = TestResults {
+                    size: results.size,
+                    iterations: results.iterations,
+                    bandwidth: results.bandwidth,
+                    msg_rate: results.msg_rate,
+                    time: results.time.clone(),
+                };
+
+                // Use the existing session to send results
+                session.send_results(&test_results)?;
             }
+
+            display.set_bandwidth_results(results);
+
+            display.display();
+        } else {
+            // Server in unidirectional mode
+            println!("Server ready for client operations");
+
+            // Wait for results from client
+            let test_results = session.receive_results()?;
+
+            // Convert TestResults to BandwidthResult
+            let bw_results = BandwidthResult {
+                size: test_results.size,
+                iterations: test_results.iterations,
+                bandwidth: test_results.bandwidth,
+                msg_rate: test_results.msg_rate,
+                time: test_results.time,
+            };
+
+            // Display results
+            display.set_bandwidth_results(bw_results);
+            display.display();
         }
 
-        let end_time = clock.now();
-        let time = end_time.duration_since(start_time);
-
-        let total_iterations: u32 = qp_iterations.iter().sum();
-        assert_eq!(
-            total_iterations, total_target_iterations,
-            "Iteration count mismatch: expected {}, got {}",
-            total_target_iterations, total_iterations
-        );
-
-        let total_bytes = msg_size as u64 * total_iterations as u64;
-        let bytes_per_second = total_bytes as f64 / time.as_secs_f64();
-
-        let results = BandwidthResult {
-            size: msg_size,
-            iterations: total_iterations,
-            bandwidth: Byte::from_f64(bytes_per_second)
-                .unwrap()
-                .get_appropriate_unit(UnitType::Binary)
-                .get_value(),
-            msg_rate: (total_iterations as f64) / time.as_secs_f64() / 1_000_000.0,
-            time: format!("{:.2}", time.as_secs_f64()),
-        };
-
-        display.set_bandwidth_results(results);
-
-        display.display();
+        session.close()?;
 
         Ok(())
     }

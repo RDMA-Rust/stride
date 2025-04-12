@@ -20,6 +20,15 @@ pub struct MemoryRegionInfo {
     pub size: usize, // Size of the memory region
 }
 
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct TestResults {
+    pub size: u32,
+    pub iterations: u32,
+    pub bandwidth: f64,
+    pub msg_rate: f64,
+    pub time: String,
+}
+
 pub struct ConnectionSetupResult {
     pub remote_mr: MemoryRegionInfo,
     pub gid_type: GidType,

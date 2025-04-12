@@ -134,9 +134,12 @@ pub struct CommonArgs {
     #[arg(long, short = 'p', default_value_t = 18515)]
     pub port: u16,
     /// Target address for client connections
-    #[arg(long, short = 'a', default_value = "127.0.0.1")]
+    #[arg(long, short = 'a', default_value = None)]
     pub address: Option<String>,
     /// Number of queue pairs to use
     #[arg(long, short = 'q', default_value_t = 1)]
     pub qp_count: u32,
+    /// Use bidirectional traffic pattern instead of default unidirectional
+    #[arg(long, short = 'b', default_value_t = false)]
+    pub bidirectional: bool,
 }

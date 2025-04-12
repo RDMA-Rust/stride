@@ -84,4 +84,8 @@ pub trait CommandContext {
     fn set_qp_count(&mut self, count: usize) {
         // Default implementation does nothing
     }
+
+    fn bidirectional(&self) -> bool {
+        false
+    }
 }

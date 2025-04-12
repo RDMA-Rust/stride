@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 
 use crate::connection::exchange::DestinationInfo;
 use crate::connection::exchange::MemoryRegionInfo;
+use crate::connection::exchange::TestResults;
 use crate::connection::manager::{ConnectionId, ConnectionInfo};
 use crate::connection::{ConnectionError, ConnectionManager, ConnectionParams, ConnectionResult};
 
@@ -155,6 +156,45 @@ impl ConnectionManager for TcpConnectionManager {
             .map_err(|e| ConnectionError::SerializationError(e.to_string()))?;
 
         Ok(remote_data)
+    }
+
+    fn exchange_results(&self, local_data: TestResults) -> ConnectionResult<TestResults> {
+        let serialized = bincode::serialize(&local_data)
+            .map_err(|e| ConnectionError::SerializationError(e.to_string()))?;
+
+        // Send raw data
+        self.send_raw(1, &serialized)?;
+
+        // Receive raw data
+        let data = self.receive_raw()?;
+
+        // Deserialize
+        let remote_data = bincode::deserialize(&data)
+            .map_err(|e| ConnectionError::SerializationError(e.to_string()))?;
+
+        Ok(remote_data)
+    }
+
+    // Method for the server to just receive results (no exchange needed)
+    fn receive_results(&self) -> ConnectionResult<TestResults> {
+        // Receive data
+        let data = self.receive_raw()?;
+
+        // Deserialize
+        let results = bincode::deserialize(&data)
+            .map_err(|e| ConnectionError::SerializationError(e.to_string()))?;
+
+        Ok(results)
+    }
+
+    // Method for the client to just send results (no exchange needed)
+    fn send_results(&self, results: &TestResults) -> ConnectionResult<()> {
+        // Serialize
+        let serialized = bincode::serialize(results)
+            .map_err(|e| ConnectionError::SerializationError(e.to_string()))?;
+
+        // Send with message type 4
+        self.send_raw(4, &serialized)
     }
 
     fn exchange_memory_regions(
@@ -302,9 +342,6 @@ impl ConnectionManager for TcpConnectionManager {
         })?;
 
         let mut guard = stream.lock().unwrap();
-        guard
-            .set_read_timeout(Some(self.params.timeout))
-            .map_err(|e| ConnectionError::IoError(e))?;
 
         // Read the size
         let mut size_buffer = [0u8; 8];

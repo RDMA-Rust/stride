@@ -6,7 +6,7 @@ use sideway::ibverbs::queue_pair::{GenericQueuePair, QueuePair};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::connection::exchange::MemoryRegionInfo;
+use crate::connection::exchange::{MemoryRegionInfo, TestResults};
 use crate::connection::{
     ConnectionError, ConnectionFactory, ConnectionManager, ConnectionManagerExt, ConnectionParams,
     ConnectionResult, DestinationInfo, EndpointRole,
@@ -133,6 +133,24 @@ impl<'a> ConnectionSession<'a> {
         }
 
         Ok(())
+    }
+
+    /// Exchange test results with peer
+    pub fn exchange_results(&self, results: TestResults) -> ConnectionResult<TestResults> {
+        println!("Exchanging test results with peer");
+        self.manager.exchange_results(results)
+    }
+
+    /// Receive test results (server mode)
+    pub fn receive_results(&self) -> ConnectionResult<TestResults> {
+        println!("Waiting to receive test results from client");
+        self.manager.receive_results()
+    }
+
+    /// Send test results (client mode)
+    pub fn send_results(&self, results: &TestResults) -> ConnectionResult<()> {
+        println!("Sending test results to server");
+        self.manager.send_results(results)
     }
 
     fn prepare_local_qp_data(
