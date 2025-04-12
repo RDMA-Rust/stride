@@ -193,7 +193,7 @@ impl<T: CommandContext> TestRunner<T> {
             pd.reg_mr(
                 memory.get_handle(),
                 memory.size(),
-                AccessFlags::LocalWrite | AccessFlags::RemoteWrite,
+                AccessFlags::LocalWrite | AccessFlags::RemoteWrite | AccessFlags::RelaxedOrdering,
             )?
         };
 
