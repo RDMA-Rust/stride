@@ -51,13 +51,8 @@ pub trait CommandContext {
     fn operation_name(&self) -> String;
 
     /// Get whether this endpoint should act as a server
-    fn server_mode(&self) -> Option<bool> {
-        None
-    }
-
-    /// Set whether this endpoint should act as a server
-    fn set_server_mode(&mut self, is_server: bool) {
-        // Default implementation does nothing
+    fn server_mode(&self) -> bool {
+        self.address().is_none()
     }
 
     /// Get the port number to listen on (server) or connect to (client)

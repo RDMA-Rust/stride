@@ -130,9 +130,6 @@ pub struct CommonArgs {
     /// QP timeout = (4 us) * (2 ^ timeout)
     #[arg(long, short = 'u', default_value_t = 14)]
     pub qp_timeout: u8,
-    /// Run in server mode (listen for connections)
-    #[arg(long)]
-    pub server: bool,
     /// Port number for connections
     #[arg(long, short = 'p', default_value_t = 18515)]
     pub port: u16,

@@ -12,10 +12,9 @@ pub struct BaseParams {
     tx_depth: Option<u32>,
     rx_depth: Option<u32>,
     use_imm_data: bool,
-    server_mode: bool,       // New field
-    address: Option<String>, // New field
-    port: u16,               // New field
-    qp_count: usize,         // New field
+    address: Option<String>,
+    port: u16,
+    qp_count: usize,
 }
 
 impl Default for BaseParams {
@@ -29,7 +28,6 @@ impl Default for BaseParams {
             tx_depth: None,
             rx_depth: None,
             use_imm_data: false,
-            server_mode: false,
             address: None,
             port: 18515,
             qp_count: 1,
@@ -60,7 +58,6 @@ impl SendBandwidthParams {
         params.set_use_immediate_data(args.imm_data);
 
         // New parameters
-        params.set_server_mode(args.common.server);
         if let Some(addr) = &args.common.address {
             params.set_address(addr.clone());
         }
@@ -80,7 +77,6 @@ impl SendBandwidthParams {
         self.set_iterations(args.iters);
         self.set_message_size(args.msg_size);
         self.set_qp_timeout(args.qp_timeout);
-        self.base.server_mode = args.server;
         self.base.address = args.address.clone();
         self.base.port = args.port;
         self.base.qp_count = args.qp_count as usize;
@@ -295,13 +291,6 @@ impl CommandContext for SendLatencyParams {
     fn operation_name(&self) -> String {
         "SEND latency test".to_string()
     }
-    fn server_mode(&self) -> Option<bool> {
-        Some(self.base.server_mode)
-    }
-
-    fn set_server_mode(&mut self, is_server: bool) {
-        self.base.server_mode = is_server;
-    }
 
     fn port(&self) -> Option<u16> {
         Some(self.base.port)
@@ -347,7 +336,6 @@ impl WriteBandwidthParams {
         params.set_use_immediate_data(args.imm_data);
 
         // New parameters
-        params.set_server_mode(args.common.server);
         if let Some(addr) = &args.common.address {
             params.set_address(addr.clone());
         }
@@ -368,7 +356,6 @@ impl WriteBandwidthParams {
         self.set_message_size(args.msg_size);
         self.set_qp_timeout(args.qp_timeout);
 
-        self.base.server_mode = args.server;
         self.base.address = args.address.clone();
         self.base.port = args.port;
         self.base.qp_count = args.qp_count as usize;
@@ -443,14 +430,6 @@ impl CommandContext for WriteBandwidthParams {
 
     fn operation_name(&self) -> String {
         "WRITE bandwidth test".to_string()
-    }
-
-    fn server_mode(&self) -> Option<bool> {
-        Some(self.base.server_mode)
-    }
-
-    fn set_server_mode(&mut self, is_server: bool) {
-        self.base.server_mode = is_server;
     }
 
     fn port(&self) -> Option<u16> {
@@ -583,14 +562,6 @@ impl CommandContext for WriteLatencyParams {
         "WRITE latency test".to_string()
     }
 
-    fn server_mode(&self) -> Option<bool> {
-        Some(self.base.server_mode)
-    }
-
-    fn set_server_mode(&mut self, is_server: bool) {
-        self.base.server_mode = is_server;
-    }
-
     fn port(&self) -> Option<u16> {
         Some(self.base.port)
     }
@@ -720,14 +691,6 @@ impl CommandContext for ReadBandwidthParams {
         "READ bandwidth test".to_string()
     }
 
-    fn server_mode(&self) -> Option<bool> {
-        Some(self.base.server_mode)
-    }
-
-    fn set_server_mode(&mut self, is_server: bool) {
-        self.base.server_mode = is_server;
-    }
-
     fn port(&self) -> Option<u16> {
         Some(self.base.port)
     }
@@ -855,14 +818,6 @@ impl CommandContext for ReadLatencyParams {
 
     fn operation_name(&self) -> String {
         "READ latency test".to_string()
-    }
-
-    fn server_mode(&self) -> Option<bool> {
-        Some(self.base.server_mode)
-    }
-
-    fn set_server_mode(&mut self, is_server: bool) {
-        self.base.server_mode = is_server;
     }
 
     fn port(&self) -> Option<u16> {

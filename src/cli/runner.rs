@@ -51,7 +51,7 @@ impl<T: CommandContext> TestRunner<T> {
         qp_details: &mut [QueuePairDetail],
     ) -> Result<ConnectionSetupResult> {
         let gid_index = self.params.gid_index().unwrap_or(0);
-        let server_mode = self.params.server_mode().unwrap_or(false);
+        let server_mode = self.params.server_mode();
 
         // Create connection parameters
         let mut conn_params = ConnectionParams::default();
@@ -89,7 +89,9 @@ impl<T: CommandContext> TestRunner<T> {
         session.establish_connection(&address)?;
         let actual_mtu = 4096;
 
-        let local_gid = ctx.query_gid_ex(1, gid_index as u32)?.gid();
+        let gid_entry = ctx.query_gid_ex(1, gid_index as u32)?;
+        let gid_type = gid_entry.gid_type();
+        let local_gid = gid_entry.gid();
         let mut remote_gid = Gid::default();
 
         // Setup each queue pair
@@ -128,6 +130,7 @@ impl<T: CommandContext> TestRunner<T> {
 
         Ok(ConnectionSetupResult {
             remote_mr,
+            gid_type,
             local_gid,
             remote_gid,
             actual_mtu,
@@ -138,15 +141,13 @@ impl<T: CommandContext> TestRunner<T> {
         println!("Starting {}", self.params.operation_name());
 
         // Default device fallback
-        let device_name = self.params.device().unwrap_or("mlx5_1");
+        let device_name = self.params.device();
         let iterations = self.params.iterations();
         let msg_size = self.params.message_size();
         let tx_depth = self.params.tx_depth().unwrap_or(512);
         let qp_count = self.params.qp_count().unwrap_or(1) as usize;
 
         let ctx = Arc::new(open_device_context(device_name)?);
-        let gid = ctx.query_gid_ex(1, 0)?;
-        let gid_2 = ctx.query_gid_ex(1, 1)?;
 
         // Determine test type
         let test_type = if self.params.operation_name().contains("SEND") {
@@ -167,19 +168,6 @@ impl<T: CommandContext> TestRunner<T> {
             } else {
                 TestType::ReadBandwidth
             }
-        };
-
-        // Create test configuration
-        let config = TestConfiguration {
-            device: ctx.name(),
-            transport: "IB".to_string(),
-            qp_count: qp_count as u32,
-            connection_type: "RC".to_string(),
-            mtu: 4096,
-            gid_type: format!("{:?}", gid.gid_type()),
-            rx_depth: self.params.rx_depth().unwrap_or(512),
-            tx_depth,
-            test_type,
         };
 
         // Create placeholder QP details (will be updated during connection setup)
@@ -235,6 +223,19 @@ impl<T: CommandContext> TestRunner<T> {
         let conn_result = self
             .setup_connection(ctx.clone(), pd.clone(), &mut qps, &mr, &mut qp_details)
             .unwrap();
+
+        // Create test configuration
+        let config = TestConfiguration {
+            device: ctx.name(),
+            transport: "IB".to_string(),
+            qp_count: qp_count as u32,
+            connection_type: "RC".to_string(),
+            mtu: conn_result.actual_mtu,
+            gid_type: format!("{:?}", gid.gid_type()),
+            rx_depth: self.params.rx_depth().unwrap_or(512),
+            tx_depth,
+            test_type,
+        };
 
         let gid_info = vec![conn_result.local_gid, conn_result.remote_gid];
         let mut display = DisplayOutput::new(config, qp_details, gid_info);
@@ -372,9 +373,11 @@ impl<T: CommandContext> TestRunner<T> {
             msg_rate: (total_iterations as f64) / time.as_secs_f64() / 1_000_000.0,
             time: format!("{:.2}", time.as_secs_f64()),
         };
+
         display.set_bandwidth_results(results);
 
         display.display();
+
         Ok(())
     }
 }

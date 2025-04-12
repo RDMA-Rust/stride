@@ -22,6 +22,7 @@ pub struct MemoryRegionInfo {
 
 pub struct ConnectionSetupResult {
     pub remote_mr: MemoryRegionInfo,
+    pub gid_type: GidType,
     pub local_gid: Gid,
     pub remote_gid: Gid,
     pub actual_mtu: u32,
