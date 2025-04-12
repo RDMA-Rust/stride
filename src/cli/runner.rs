@@ -375,7 +375,7 @@ impl<T: CommandContext> TestRunner<T> {
                 iterations: total_iterations,
                 bandwidth: Byte::from_f64(bytes_per_second)
                     .unwrap()
-                    .get_appropriate_unit(UnitType::Binary)
+                    .get_adjusted_unit(byte_unit::Unit::Gbit)
                     .get_value(),
                 msg_rate: (total_iterations as f64) / time.as_secs_f64() / 1_000_000.0,
                 time: format!("{:.2}", time.as_secs_f64()),
