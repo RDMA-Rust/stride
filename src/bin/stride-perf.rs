@@ -4,7 +4,7 @@ use stride::cli::params::{
     WriteBandwidthParams, WriteLatencyParams,
 };
 use stride::cli::perf::{PerfCli, PerfCommands, ReadCommands, SendCommands, WriteCommands};
-use stride::cli::runner::TestRunner;
+use stride::runners::runner::TestRunner;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = PerfCli::parse();

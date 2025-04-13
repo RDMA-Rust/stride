@@ -315,7 +315,7 @@ impl DisplayOutput {
 
             // Improved table formatting with constants
             let table = Table::new([results])
-                .with(style)
+                .with(style.clone())
                 .with(Width::increase(table_width))
                 .modify(Columns::single(0), Width::truncate(SIZE_COLUMN_WIDTH))
                 .modify(Columns::single(0), Width::increase(SIZE_COLUMN_WIDTH))
@@ -343,7 +343,7 @@ impl DisplayOutput {
             );
 
             let table = Table::new([results])
-                .with(style)
+                .with(style.clone())
                 .with(Width::increase(header_width!()))
                 .to_string();
 
