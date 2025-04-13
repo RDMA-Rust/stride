@@ -11,7 +11,6 @@ use exchange::TestResults;
 use sideway::ibverbs::device_context::DeviceContext;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::GenericQueuePair;
-use sideway::ibverbs::queue_pair::QueuePair;
 use std::net::SocketAddr;
 use std::time::Duration;
 

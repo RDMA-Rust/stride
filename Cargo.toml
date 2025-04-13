@@ -18,6 +18,7 @@ quanta = "0.12"
 byte-unit = "5.1"
 rand = "0.8"
 bincode = "1"
+hdrhistogram = "7"
 
 [lib]
 name = "stride"

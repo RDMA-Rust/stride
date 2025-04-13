@@ -1,16 +1,15 @@
+use serde::{Deserialize, Serialize};
 use sideway::ibverbs::address::Gid;
 use std::fmt::Display;
 use tabled::{
-    settings::{
-        object::{Columns, Rows},
-        style::HorizontalLine,
-        Border, Style, Width,
-    },
+    settings::{object::Columns, Style, Width},
     Table, Tabled,
 };
 
 // Display configuration constants
 pub const DEFAULT_HEADER_WIDTH: usize = 90;
+pub const DEFAULT_LAT_HEADER_WIDTH: usize = 140;
+
 pub const DEFAULT_ROWS_PER_COLUMN: usize = 10;
 pub const DEFAULT_COLUMN_SPACING: usize = 10;
 pub const DEFAULT_KEY_VALUE_SPACING: usize = 1; // Includes ":    " spacing
@@ -23,34 +22,19 @@ pub const BANDWIDTH_COLUMN_WIDTH: usize = 18;
 pub const MSG_RATE_COLUMN_WIDTH: usize = 18;
 pub const SEPARATOR_WIDTH: usize = 3; // Width of a single separator character
 pub const COLUMN_COUNT: usize = 5; // Total number of columns
-pub const START_AND_END_SPACES_WIDTH: usize = 2; // Width of start and end spaces
 
 // Latency column widths
-pub const LATENCY_COLUMN_WIDTH: usize = 18;
-pub const LAT_SIZE_WIDTH: usize = 8;
-pub const LAT_ITER_WIDTH: usize = 12;
-pub const LAT_MIN_WIDTH: usize = 14;
-pub const LAT_MAX_WIDTH: usize = 14;
-pub const LAT_TYP_WIDTH: usize = 16;
-pub const LAT_AVG_WIDTH: usize = 14;
-pub const LAT_STDEV_WIDTH: usize = 15;
-pub const LAT_P99_WIDTH: usize = 12;
-pub const LAT_P999_WIDTH: usize = 16;
+pub const LAT_SIZE_COLUMN_WIDTH: usize = 12;
+pub const LAT_ITER_COLUMN_WIDTH: usize = 12;
+pub const LAT_MIN_COLUMN_WIDTH: usize = 12;
+pub const LAT_MAX_COLUMN_WIDTH: usize = 14;
+pub const LAT_TYP_COLUMN_WIDTH: usize = 12;
+pub const LAT_AVG_COLUMN_WIDTH: usize = 12;
+pub const LAT_STDEV_COLUMN_WIDTH: usize = 12;
+pub const LAT_P99_COLUMN_WIDTH: usize = 12;
+pub const LAT_COLUMN_COUNT: usize = 9; // Total number of columns
 
-// Function to get the minimum width required for latency table
-pub fn min_latency_table_width() -> usize {
-    LAT_SIZE_WIDTH
-        + LAT_ITER_WIDTH
-        + LAT_MIN_WIDTH
-        + LAT_MAX_WIDTH
-        + LAT_TYP_WIDTH
-        + LAT_AVG_WIDTH
-        + LAT_STDEV_WIDTH
-        + LAT_P99_WIDTH
-        + LAT_P999_WIDTH
-        + (SEPARATOR_WIDTH * 8)
-        + DEFAULT_HEADER_MARGIN_LEN // 8 separators for 9 columns
-}
+pub const START_AND_END_SPACES_WIDTH: usize = 2; // Width of start and end spaces
 
 macro_rules! header_width {
     () => {
@@ -58,6 +42,14 @@ macro_rules! header_width {
     };
     ($w:expr) => {
         $w
+    };
+    (for_test $test_type:expr) => {
+        match $test_type {
+            TestType::SendLatency | TestType::WriteLatency | TestType::ReadLatency => {
+                DEFAULT_LAT_HEADER_WIDTH
+            }
+            _ => DEFAULT_HEADER_WIDTH,
+        }
     };
 }
 
@@ -74,7 +66,7 @@ pub struct TestConfiguration {
     pub test_type: TestType,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestType {
     SendBandwidth,
     SendLatency,
@@ -82,6 +74,15 @@ pub enum TestType {
     WriteLatency,
     ReadBandwidth,
     ReadLatency,
+}
+
+impl TestType {
+    pub fn is_latency(&self) -> bool {
+        matches!(
+            self,
+            TestType::SendLatency | TestType::WriteLatency | TestType::ReadLatency
+        )
+    }
 }
 
 impl Display for TestType {
@@ -137,7 +138,7 @@ impl Display for TestConfiguration {
     }
 }
 
-#[derive(Tabled)]
+#[derive(Serialize, Deserialize, Tabled, Clone, Debug)]
 pub struct BandwidthResult {
     #[tabled(rename = "Size (B)")]
     pub size: u32,
@@ -151,25 +152,25 @@ pub struct BandwidthResult {
     pub time: String,
 }
 
-#[derive(Tabled)]
+#[derive(Serialize, Deserialize, Tabled, Clone, Debug)]
 pub struct LatencyResult {
     #[tabled(rename = "Size (B)")]
     pub size: u32,
     #[tabled(rename = "Iterations")]
     pub iterations: u32,
-    #[tabled(rename = "t_min [usec]")]
+    #[tabled(rename = "Min (us)", display = "format_common_float")]
     pub min_latency: f64,
-    #[tabled(rename = "t_max [usec]")]
+    #[tabled(rename = "Max (us)", display = "format_common_float")]
     pub max_latency: f64,
-    #[tabled(rename = "t_typical [usec]")]
-    pub typical_latency: f64,
-    #[tabled(rename = "t_avg [usec]")]
+    #[tabled(rename = "Avg (us)", display = "format_common_float")]
     pub avg_latency: f64,
-    #[tabled(rename = "t_stdev [usec]")]
+    #[tabled(rename = "Stdev (us)", display = "format_common_float")]
     pub stdev_latency: f64,
-    #[tabled(rename = "P99 [usec]")]
+    #[tabled(rename = "P50 (us)", display = "format_common_float")]
+    pub typical_latency: f64,
+    #[tabled(rename = "P99 (us)", display = "format_common_float")]
     pub p99_latency: f64,
-    #[tabled(rename = "P999 [usec]")]
+    #[tabled(rename = "P999 (us)", display = "format_common_float")]
     pub p999_latency: f64,
 }
 
@@ -189,11 +190,30 @@ fn format_msg_rate(f: &f64) -> String {
     format!("{:.4}", f)
 }
 
+fn format_common_float(f: &f64) -> String {
+    format!("{:.3}", f)
+}
+
 pub fn min_required_table_width() -> usize {
     SIZE_COLUMN_WIDTH + ITERATIONS_COLUMN_WIDTH +
     BANDWIDTH_COLUMN_WIDTH + MSG_RATE_COLUMN_WIDTH +
     // Account for minimum width needed for time column and separators
     10 + (SEPARATOR_WIDTH * (COLUMN_COUNT - 1)) + START_AND_END_SPACES_WIDTH
+}
+
+// Function to get the minimum width required for latency table
+pub fn min_required_latency_table_width() -> usize {
+    LAT_SIZE_COLUMN_WIDTH
+        + LAT_ITER_COLUMN_WIDTH
+        + LAT_MIN_COLUMN_WIDTH
+        + LAT_MAX_COLUMN_WIDTH
+        + LAT_TYP_COLUMN_WIDTH
+        + LAT_AVG_COLUMN_WIDTH
+        + LAT_STDEV_COLUMN_WIDTH
+        + LAT_P99_COLUMN_WIDTH
+        + 10
+        + (SEPARATOR_WIDTH * (LAT_COLUMN_COUNT - 1))
+        + START_AND_END_SPACES_WIDTH
 }
 
 fn create_header(text: &str, width: usize, margin_len: usize) -> String {
@@ -252,11 +272,13 @@ impl DisplayOutput {
     }
 
     pub fn display(&self) {
+        let header_width = header_width!(for_test self.config.test_type);
+
         println!(
             "{}",
             create_header(
                 &format!("{}", self.config.test_type),
-                header_width!(),
+                header_width,
                 DEFAULT_HEADER_MARGIN_LEN
             )
         );
@@ -266,30 +288,26 @@ impl DisplayOutput {
             "{}",
             create_header(
                 "Connection Details",
-                header_width!(),
+                header_width,
                 DEFAULT_HEADER_MARGIN_LEN
             )
         );
         println!("{}\n", self.format_qp_details());
 
         let style = Style::ascii()
-        .remove_top()
-        .remove_left()
-        .remove_right()
-        .intersection_bottom('-');
+            .remove_top()
+            .remove_left()
+            .remove_right()
+            .intersection_bottom('-');
 
         if let Some(results) = &self.bw_results {
             println!(
                 "{}",
-                create_header(
-                    "Bandwidth Results",
-                    header_width!(),
-                    DEFAULT_HEADER_MARGIN_LEN
-                )
+                create_header("Bandwidth Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
             );
 
             // Ensure our header width can accommodate the table
-            let table_width = header_width!();
+            let table_width = header_width;
             let required_width = min_required_table_width();
 
             // Assert to catch potential layout issues during development
@@ -335,16 +353,60 @@ impl DisplayOutput {
         if let Some(results) = &self.lat_results {
             println!(
                 "{}",
-                create_header(
-                    "Latency Results",
-                    header_width!(),
-                    DEFAULT_HEADER_MARGIN_LEN
-                )
+                create_header("Latency Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
             );
+
+            // Ensure our header width can accommodate the table
+            let table_width = header_width;
+            let required_width = min_required_latency_table_width();
+
+            // Assert to catch potential layout issues during development
+            debug_assert!(
+                table_width >= required_width,
+                "Header width {} is insufficient for table minimum width {}",
+                table_width,
+                required_width
+            );
+
+            // Calculate remaining width for the last column
+            let defined_width = LAT_SIZE_COLUMN_WIDTH
+                + LAT_ITER_COLUMN_WIDTH
+                + LAT_MIN_COLUMN_WIDTH
+                + LAT_MAX_COLUMN_WIDTH
+                + LAT_TYP_COLUMN_WIDTH
+                + LAT_AVG_COLUMN_WIDTH
+                + LAT_STDEV_COLUMN_WIDTH
+                + LAT_P99_COLUMN_WIDTH
+                + (SEPARATOR_WIDTH * (LAT_COLUMN_COUNT - 1))
+                + START_AND_END_SPACES_WIDTH;
+
+            let remaining_width = table_width.saturating_sub(defined_width);
+
+            // Set time column to fill remaining space (with a reasonable minimum)
+            let p999_column_width = std::cmp::max(10, remaining_width);
 
             let table = Table::new([results])
                 .with(style.clone())
-                .with(Width::increase(header_width!()))
+                .with(Width::increase(header_width))
+                // Column widths based on constants
+                .modify(Columns::single(0), Width::truncate(LAT_SIZE_COLUMN_WIDTH))
+                .modify(Columns::single(0), Width::increase(LAT_SIZE_COLUMN_WIDTH))
+                .modify(Columns::single(1), Width::truncate(LAT_ITER_COLUMN_WIDTH))
+                .modify(Columns::single(1), Width::increase(LAT_ITER_COLUMN_WIDTH))
+                .modify(Columns::single(2), Width::truncate(LAT_MIN_COLUMN_WIDTH))
+                .modify(Columns::single(2), Width::increase(LAT_MIN_COLUMN_WIDTH))
+                .modify(Columns::single(3), Width::truncate(LAT_MAX_COLUMN_WIDTH))
+                .modify(Columns::single(3), Width::increase(LAT_MAX_COLUMN_WIDTH))
+                .modify(Columns::single(4), Width::truncate(LAT_TYP_COLUMN_WIDTH))
+                .modify(Columns::single(4), Width::increase(LAT_TYP_COLUMN_WIDTH))
+                .modify(Columns::single(5), Width::truncate(LAT_AVG_COLUMN_WIDTH))
+                .modify(Columns::single(5), Width::increase(LAT_AVG_COLUMN_WIDTH))
+                .modify(Columns::single(6), Width::truncate(LAT_STDEV_COLUMN_WIDTH))
+                .modify(Columns::single(6), Width::increase(LAT_STDEV_COLUMN_WIDTH))
+                .modify(Columns::single(7), Width::truncate(LAT_P99_COLUMN_WIDTH))
+                .modify(Columns::single(7), Width::increase(LAT_P99_COLUMN_WIDTH))
+                .modify(Columns::single(8), Width::truncate(p999_column_width))
+                .modify(Columns::single(8), Width::increase(p999_column_width))
                 .to_string();
 
             println!("{}", table);

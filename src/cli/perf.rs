@@ -1,4 +1,3 @@
-use crate::cli::context::CommandContext;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]

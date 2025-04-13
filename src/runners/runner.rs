@@ -1,20 +1,19 @@
 use crate::connection::exchange::ConnectionSetupResult;
-use crate::connection::exchange::MemoryRegionInfo;
 use anyhow::Result;
-use byte_unit::{Byte, UnitType};
+use byte_unit::Byte;
 use quanta::Clock;
-use sideway::ibverbs::address::{AddressHandleAttribute, Gid, GidEntry};
+use quanta::Instant;
+use quanta::IntoNanoseconds;
+use sideway::ibverbs::address::Gid;
 use sideway::ibverbs::completion::{
     CreateCompletionQueueWorkCompletionFlags, GenericCompletionQueue, WorkCompletionStatus,
 };
 use sideway::ibverbs::device::DeviceInfo;
 use sideway::ibverbs::device_context::DeviceContext;
-use sideway::ibverbs::device_context::Mtu;
 use sideway::ibverbs::memory_region::MemoryRegion;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::{
-    GenericQueuePair, PostSendGuard, QueuePair, QueuePairAttribute, QueuePairState,
-    SetScatterGatherEntry, WorkRequestFlags,
+    GenericQueuePair, PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
 };
 use sideway::ibverbs::AccessFlags;
 
@@ -30,7 +29,7 @@ use crate::context::device::open_device_context;
 use crate::memory::system::SystemMemory;
 use crate::memory::MemoryOps;
 use crate::utils::display::{
-    BandwidthResult, DisplayOutput, QueuePairDetail, TestConfiguration, TestType,
+    BandwidthResult, DisplayOutput, LatencyResult, QueuePairDetail, TestConfiguration, TestType,
 };
 use crate::utils::random;
 
@@ -141,6 +140,150 @@ impl<T: CommandContext> TestRunner<T> {
         ))
     }
 
+    // Helper methods to improve readability
+    fn wait_for_completion(
+        &self,
+        cq: &GenericCompletionQueue,
+        start_time: Instant,
+        histogram: &mut hdrhistogram::Histogram<u64>,
+        min_latency_ns: &mut u64,
+        max_latency_ns: &mut u64,
+        inflight_per_qp: &mut [u32],
+        clock: &Clock,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            match cq.start_poll() {
+                Ok(mut poller) => {
+                    while let Some(wc) = poller.next() {
+                        let wc_qp_idx = (wc.wr_id() >> 32) as usize;
+
+                        if wc.status() != WorkCompletionStatus::Success as u32 {
+                            return Err(format!(
+                                "QP #{}: Failed status {:?} ({}) for iteration {}",
+                                wc_qp_idx,
+                                Into::<WorkCompletionStatus>::into(wc.status()),
+                                wc.status(),
+                                wc.wr_id() & 0xFFFFFFFF
+                            )
+                            .into());
+                        }
+
+                        if wc_qp_idx == 0 {
+                            // Measure completion time
+                            let completion_time = clock.now();
+
+                            // Calculate latency
+                            // let latency_ns = if wc.wc_flags()
+                            //     & CreateCompletionQueueWorkCompletionFlags::CompletionTimestamp.bi
+                            //     != 0
+                            // {
+                            //     // Use hardware timestamp if available
+                            //     wc.completion_timestamp() as u64
+                            // } else {
+                            // Fall back to software timing
+                            let latency_ns =
+                                completion_time.duration_since(start_time).into_nanos();
+                            // };
+
+                            // Record latency
+                            histogram.record(latency_ns)?;
+                            *min_latency_ns = (*min_latency_ns).min(latency_ns);
+                            *max_latency_ns = (*max_latency_ns).max(latency_ns);
+
+                            inflight_per_qp[wc_qp_idx] -= 1;
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fn poll_completions(
+        &self,
+        cq: &GenericCompletionQueue,
+        inflight_per_qp: &mut [u32],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match cq.start_poll() {
+            Ok(mut poller) => {
+                while let Some(wc) = poller.next() {
+                    let qp_idx = (wc.wr_id() >> 32) as usize;
+
+                    if wc.status() != WorkCompletionStatus::Success as u32 {
+                        return Err(format!(
+                            "QP #{}: Failed status {:?} ({}) for iteration {}",
+                            qp_idx,
+                            Into::<WorkCompletionStatus>::into(wc.status()),
+                            wc.status(),
+                            wc.wr_id() & 0xFFFFFFFF
+                        )
+                        .into());
+                    }
+
+                    inflight_per_qp[qp_idx] -= 1;
+                }
+            }
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    fn calculate_latency_results(
+        &self,
+        msg_size: u32,
+        iterations: u32,
+        histogram: &hdrhistogram::Histogram<u64>,
+        min_latency_ns: u64,
+        max_latency_ns: u64,
+    ) -> LatencyResult {
+        // Convert nanosecond values to microseconds for display
+        let min_latency = min_latency_ns as f64 / 1000.0;
+        let max_latency = max_latency_ns as f64 / 1000.0;
+
+        // Calculate microsecond statistics from the histogram
+        let avg_latency = histogram.mean() / 1000.0;
+        let p50_latency = histogram.value_at_quantile(0.5) as f64 / 1000.0;
+        let p99_latency = histogram.value_at_quantile(0.99) as f64 / 1000.0;
+        let p999_latency = histogram.value_at_quantile(0.999) as f64 / 1000.0;
+
+        // Calculate standard deviation in microseconds
+        let stdev_latency = histogram.stdev() / 1000.0;
+
+        LatencyResult {
+            size: msg_size,
+            iterations,
+            min_latency,
+            max_latency,
+            typical_latency: p50_latency,
+            avg_latency,
+            stdev_latency,
+            p99_latency,
+            p999_latency,
+        }
+    }
+
+    fn calculate_bandwidth_results(
+        &self,
+        msg_size: u32,
+        iterations: u32,
+        time: f64,
+    ) -> BandwidthResult {
+        let total_bytes = msg_size as u64 * iterations as u64;
+        let bytes_per_second = total_bytes as f64 / time;
+
+        BandwidthResult {
+            size: msg_size,
+            iterations,
+            bandwidth: Byte::from_f64(bytes_per_second)
+                .unwrap()
+                .get_adjusted_unit(byte_unit::Unit::Gbit)
+                .get_value(),
+            msg_rate: (iterations as f64) / time / 1_000_000.0,
+            time: format!("{:.2}", time),
+        }
+    }
+
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Starting {}", self.params.operation_name());
 
@@ -152,6 +295,7 @@ impl<T: CommandContext> TestRunner<T> {
         let qp_count = self.params.qp_count().unwrap_or(1) as usize;
 
         let ctx = Arc::new(open_device_context(device_name)?);
+        let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
 
         // Determine test type
         let test_type = if self.params.operation_name().contains("SEND") {
@@ -173,6 +317,9 @@ impl<T: CommandContext> TestRunner<T> {
                 TestType::ReadBandwidth
             }
         };
+
+        let is_latency = test_type.is_latency();
+        let tx_depth = if is_latency { 1 } else { tx_depth };
 
         // Create placeholder QP details (will be updated during connection setup)
         let mut qp_details = Vec::with_capacity(qp_count);
@@ -243,8 +390,6 @@ impl<T: CommandContext> TestRunner<T> {
 
         let is_server = self.params.server_mode();
         let is_bidirectional = self.params.bidirectional();
-        let mut cur_iter: u32 = 0;
-        let mut inflight = 0;
         let remote_mr = conn_result.remote_mr;
 
         let iterations_per_qp = iterations;
@@ -261,6 +406,10 @@ impl<T: CommandContext> TestRunner<T> {
 
             let mut all_completed = false;
 
+            let mut min_latency_ns: u64 = u64::MAX;
+            let mut max_latency_ns: u64 = 0;
+            let mut operation_start_time = None;
+
             while !all_completed {
                 // Post operations to all QPs that have space in their queue
                 for qp_idx in 0..qp_count {
@@ -273,6 +422,8 @@ impl<T: CommandContext> TestRunner<T> {
                     while inflight_per_qp[qp_idx] < tx_depth
                         && qp_iterations[qp_idx] < iterations_per_qp
                     {
+                        operation_start_time = if is_latency { Some(clock.now()) } else { None };
+
                         let mut guard = qps[qp_idx].start_post_send();
 
                         // Calculate buffer offset - each QP has its own buffer region
@@ -285,6 +436,7 @@ impl<T: CommandContext> TestRunner<T> {
                         let local_addr = mr.get_ptr() as u64 + total_offset as u64;
 
                         let wr_id = ((qp_idx as u64) << 32) | (qp_iterations[qp_idx] as u64);
+
                         // For WRITE operations, use remote memory info
                         let send_handle = if is_write {
                             // Remote memory layout should match local layout
@@ -312,37 +464,19 @@ impl<T: CommandContext> TestRunner<T> {
                     }
                 }
 
-                match cq.start_poll() {
-                    Ok(mut poller) => {
-                        while let Some(wc) = poller.next() {
-                            // Extract QP index from high 32 bits of wr_id
-                            let wr_id = wc.wr_id();
-                            let qp_idx = (wr_id >> 32) as usize;
-                            let iter_num = (wr_id & 0xFFFFFFFF) as u32;
-
-                            if qp_idx < qp_count {
-                                if wc.status() != WorkCompletionStatus::Success as u32 {
-                                    return Err(format!(
-                                        "QP #{}: Failed status {:#?} ({}) for iteration {}",
-                                        qp_idx,
-                                        Into::<WorkCompletionStatus>::into(wc.status()),
-                                        wc.status(),
-                                        iter_num
-                                    )
-                                    .into());
-                                }
-
-                                inflight_per_qp[qp_idx] -= 1;
-                            } else {
-                                return Err(format!(
-                                    "Invalid QP index {} decoded from wr_id {}",
-                                    qp_idx, wr_id
-                                )
-                                .into());
-                            }
-                        }
-                    }
-                    Err(_) => {}
+                if is_latency {
+                    let start_time = operation_start_time.unwrap();
+                    self.wait_for_completion(
+                        &cq,
+                        start_time,
+                        &mut histogram,
+                        &mut min_latency_ns,
+                        &mut max_latency_ns,
+                        &mut inflight_per_qp,
+                        &clock,
+                    )?;
+                } else {
+                    self.poll_completions(&cq, &mut inflight_per_qp)?;
                 }
 
                 all_completed = true;
@@ -364,36 +498,53 @@ impl<T: CommandContext> TestRunner<T> {
                 total_target_iterations, total_iterations
             );
 
-            let total_bytes = msg_size as u64 * total_iterations as u64;
-            let bytes_per_second = total_bytes as f64 / time.as_secs_f64();
+            if is_latency {
+                let lat_results = self.calculate_latency_results(
+                    msg_size,
+                    total_iterations,
+                    &histogram,
+                    min_latency_ns,
+                    max_latency_ns,
+                );
+                display.set_latency_results(lat_results.clone());
 
-            let results = BandwidthResult {
-                size: msg_size,
-                iterations: total_iterations,
-                bandwidth: Byte::from_f64(bytes_per_second)
-                    .unwrap()
-                    .get_adjusted_unit(byte_unit::Unit::Gbit)
-                    .get_value(),
-                msg_rate: (total_iterations as f64) / time.as_secs_f64() / 1_000_000.0,
-                time: format!("{:.2}", time.as_secs_f64()),
-            };
+                if !is_bidirectional && !is_server {
+                    // Convert BandwidthResult to TestResults
+                    let test_results = TestResults {
+                        test_type: crate::connection::exchange::TestType::Latency,
+                        size: msg_size,
+                        iterations: total_iterations,
+                        time: format!("{:.2}", time.as_secs_f64()),
+                        bandwidth_result: None,
+                        latency_result: Some(lat_results),
+                    };
 
-            // If client in unidirectional mode, send results to server
-            if !is_bidirectional && !is_server {
-                // Convert BandwidthResult to TestResults
-                let test_results = TestResults {
-                    size: results.size,
-                    iterations: results.iterations,
-                    bandwidth: results.bandwidth,
-                    msg_rate: results.msg_rate,
-                    time: results.time.clone(),
-                };
+                    // Use the existing session to send results
+                    session.send_results(&test_results)?;
+                }
+            } else {
+                let bw_results = self.calculate_bandwidth_results(
+                    msg_size,
+                    total_iterations,
+                    time.as_secs_f64(),
+                );
+                display.set_bandwidth_results(bw_results.clone());
 
-                // Use the existing session to send results
-                session.send_results(&test_results)?;
+                // If client in unidirectional mode, send results to server
+                if !is_bidirectional && !is_server {
+                    let test_results = TestResults {
+                        test_type: crate::connection::exchange::TestType::Bandwidth,
+                        size: msg_size,
+                        iterations: total_iterations,
+                        time: format!("{:.2}", time.as_secs_f64()),
+                        bandwidth_result: Some(bw_results),
+                        latency_result: None,
+                    };
+
+                    // Use the existing session to send results
+                    session.send_results(&test_results)?;
+                }
             }
-
-            display.set_bandwidth_results(results);
 
             display.display();
         } else {
@@ -403,17 +554,20 @@ impl<T: CommandContext> TestRunner<T> {
             // Wait for results from client
             let test_results = session.receive_results()?;
 
-            // Convert TestResults to BandwidthResult
-            let bw_results = BandwidthResult {
-                size: test_results.size,
-                iterations: test_results.iterations,
-                bandwidth: test_results.bandwidth,
-                msg_rate: test_results.msg_rate,
-                time: test_results.time,
-            };
+            match test_results.test_type {
+                crate::connection::exchange::TestType::Latency => {
+                    if let Some(lat_results) = test_results.latency_result {
+                        display.set_latency_results(lat_results);
+                    }
+                }
 
-            // Display results
-            display.set_bandwidth_results(bw_results);
+                crate::connection::exchange::TestType::Bandwidth => {
+                    if let Some(bw_results) = test_results.bandwidth_result {
+                        display.set_bandwidth_results(bw_results);
+                    }
+                }
+            }
+
             display.display();
         }
 

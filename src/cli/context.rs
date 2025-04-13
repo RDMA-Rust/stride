@@ -61,7 +61,7 @@ pub trait CommandContext {
     }
 
     /// Set the port number
-    fn set_port(&mut self, port: u16) {
+    fn set_port(&mut self, _port: u16) {
         // Default implementation does nothing
     }
 
@@ -71,7 +71,7 @@ pub trait CommandContext {
     }
 
     /// Set the target address for client connections
-    fn set_address(&mut self, address: String) {
+    fn set_address(&mut self, _address: String) {
         // Default implementation does nothing
     }
 
@@ -81,7 +81,7 @@ pub trait CommandContext {
     }
 
     /// Set the number of QPs to use
-    fn set_qp_count(&mut self, count: usize) {
+    fn set_qp_count(&mut self, _count: usize) {
         // Default implementation does nothing
     }
 

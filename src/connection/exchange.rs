@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use sideway::ibverbs::address::{Gid, GidType};
 use sideway::ibverbs::device_context::Mtu;
 
+use crate::utils::display::{BandwidthResult, LatencyResult};
+
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 pub struct DestinationInfo {
     pub lid: u32,
@@ -20,13 +22,21 @@ pub struct MemoryRegionInfo {
     pub size: usize, // Size of the memory region
 }
 
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+pub enum TestType {
+    Bandwidth,
+    Latency,
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct TestResults {
+    pub test_type: TestType,
     pub size: u32,
     pub iterations: u32,
-    pub bandwidth: f64,
-    pub msg_rate: f64,
     pub time: String,
+
+    pub bandwidth_result: Option<BandwidthResult>,
+    pub latency_result: Option<LatencyResult>,
 }
 
 pub struct ConnectionSetupResult {

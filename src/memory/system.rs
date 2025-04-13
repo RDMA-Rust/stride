@@ -5,7 +5,7 @@ use crate::memory::MemoryOps;
 
 pub struct SystemMemory {
     data: Pin<Box<[u8]>>,
-    numa_node: Option<i32>,
+    _numa_node: Option<i32>,
 }
 
 impl SystemMemory {
@@ -13,7 +13,7 @@ impl SystemMemory {
         let vec = vec![0u8; size];
         Ok(SystemMemory {
             data: Pin::new(vec.into_boxed_slice()),
-            numa_node,
+            _numa_node: numa_node,
         })
     }
 }

@@ -1,8 +1,4 @@
 use clap::Parser;
-use stride::cli::params::{
-    ReadBandwidthParams, ReadLatencyParams, SendBandwidthParams, SendLatencyParams,
-    WriteBandwidthParams, WriteLatencyParams,
-};
 use stride::cli::perf::{PerfCli, PerfCommands, ReadCommands, SendCommands, WriteCommands};
 use stride::runners::runner::TestRunner;
 

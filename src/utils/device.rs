@@ -59,7 +59,7 @@ impl DeviceDetail {
 
 pub fn probe_devices(
     detailed: bool,
-    show_numa: bool,
+    _show_numa: bool,
     filter_device: Option<&str>,
 ) -> anyhow::Result<()> {
     let device_list = sideway::ibverbs::device::DeviceList::new()?;

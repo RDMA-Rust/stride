@@ -1,5 +1,5 @@
 use super::context::CommandContext;
-use crate::cli::perf::{CommonArgs, SendBandwidthArgs};
+use crate::cli::perf::SendBandwidthArgs;
 
 /// Base parameters shared by all commands
 #[derive(Debug, Clone)]

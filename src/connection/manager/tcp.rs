@@ -18,9 +18,7 @@ use crate::connection::manager::{ConnectionId, ConnectionInfo};
 use crate::connection::{ConnectionError, ConnectionManager, ConnectionParams, ConnectionResult};
 
 use sideway::ibverbs::address::AddressHandleAttribute;
-use sideway::ibverbs::address::Gid;
 use sideway::ibverbs::device_context::DeviceContext;
-use sideway::ibverbs::device_context::Mtu;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::QueuePairAttribute;
 use sideway::ibverbs::queue_pair::QueuePairState;
@@ -29,7 +27,7 @@ use sideway::ibverbs::AccessFlags;
 
 use serde::{Deserialize, Serialize};
 
-const CONNECTION_PROTOCOL_VERSION: u32 = 1;
+const _CONNECTION_PROTOCOL_VERSION: u32 = 1;
 
 /// Header for connection protocol messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,8 +247,8 @@ impl ConnectionManager for TcpConnectionManager {
 
     fn setup_qp(
         &self,
-        ctx: &DeviceContext,
-        pd: &ProtectionDomain,
+        _ctx: &DeviceContext,
+        _pd: &ProtectionDomain,
         qp: &mut GenericQueuePair,
         local_data: DestinationInfo,
     ) -> ConnectionResult<DestinationInfo> {
@@ -314,7 +312,7 @@ impl ConnectionManager for TcpConnectionManager {
         Ok(remote_data)
     }
 
-    fn send_raw(&self, message_type: u32, payload: &[u8]) -> ConnectionResult<()> {
+    fn send_raw(&self, _message_type: u32, payload: &[u8]) -> ConnectionResult<()> {
         let stream = self.stream.as_ref().ok_or_else(|| {
             ConnectionError::InvalidConfiguration("No active TCP connection".to_string())
         })?;
@@ -363,10 +361,10 @@ impl ConnectionManager for TcpConnectionManager {
 // TCP-specific dispatcher
 pub struct TcpDispatcher {
     listener: TcpListener,
-    connections: HashMap<ConnectionId, ConnectionInfo>,
-    exchange_buffer: Vec<u8>,
+    _connections: HashMap<ConnectionId, ConnectionInfo>,
+    _exchange_buffer: Vec<u8>,
     next_conn_id: AtomicU64,
-    next_worker: AtomicUsize,
+    _next_worker: AtomicUsize,
 }
 
 // Implementation for TCP Dispatcher
@@ -376,17 +374,17 @@ impl TcpDispatcher {
 
         Ok(Self {
             listener,
-            connections: HashMap::new(),
-            exchange_buffer: vec![0; 1024],
+            _connections: HashMap::new(),
+            _exchange_buffer: vec![0; 1024],
             next_conn_id: AtomicU64::new(0),
-            next_worker: AtomicUsize::new(0),
+            _next_worker: AtomicUsize::new(0),
         })
     }
 
     pub fn run(&mut self) -> anyhow::Result<()> {
         loop {
-            let (stream, addr) = self.listener.accept()?;
-            let conn_id = ConnectionId(self.next_conn_id.fetch_add(1, Ordering::Relaxed));
+            let (_stream, _addr) = self.listener.accept()?;
+            let _conn_id = ConnectionId(self.next_conn_id.fetch_add(1, Ordering::Relaxed));
         }
     }
 }
