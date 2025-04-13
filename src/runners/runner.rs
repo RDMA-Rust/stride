@@ -154,7 +154,7 @@ impl<T: CommandContext> TestRunner<T> {
         loop {
             match cq.start_poll() {
                 Ok(mut poller) => {
-                    while let Some(wc) = poller.next() {
+                    for wc in poller.by_ref() {
                         let wc_qp_idx = (wc.wr_id() >> 32) as usize;
 
                         if wc.status() != WorkCompletionStatus::Success as u32 {
@@ -205,26 +205,23 @@ impl<T: CommandContext> TestRunner<T> {
         cq: &GenericCompletionQueue,
         inflight_per_qp: &mut [u32],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        match cq.start_poll() {
-            Ok(mut poller) => {
-                while let Some(wc) = poller.next() {
-                    let qp_idx = (wc.wr_id() >> 32) as usize;
+        if let Ok(poller) = cq.start_poll() {
+            for wc in poller {
+                let qp_idx = (wc.wr_id() >> 32) as usize;
 
-                    if wc.status() != WorkCompletionStatus::Success as u32 {
-                        return Err(format!(
-                            "QP #{}: Failed status {:?} ({}) for iteration {}",
-                            qp_idx,
-                            Into::<WorkCompletionStatus>::into(wc.status()),
-                            wc.status(),
-                            wc.wr_id() & 0xFFFFFFFF
-                        )
-                        .into());
-                    }
-
-                    inflight_per_qp[qp_idx] -= 1;
+                if wc.status() != WorkCompletionStatus::Success as u32 {
+                    return Err(format!(
+                        "QP #{}: Failed status {:?} ({}) for iteration {}",
+                        qp_idx,
+                        Into::<WorkCompletionStatus>::into(wc.status()),
+                        wc.status(),
+                        wc.wr_id() & 0xFFFFFFFF
+                    )
+                    .into());
                 }
+
+                inflight_per_qp[qp_idx] -= 1;
             }
-            Err(_) => {}
         }
         Ok(())
     }
@@ -292,7 +289,7 @@ impl<T: CommandContext> TestRunner<T> {
         let iterations = self.params.iterations();
         let msg_size = self.params.message_size();
         let tx_depth = self.params.tx_depth().unwrap_or(512);
-        let qp_count = self.params.qp_count().unwrap_or(1) as usize;
+        let qp_count = self.params.qp_count().unwrap_or(1);
 
         let ctx = Arc::new(open_device_context(device_name)?);
         let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
@@ -310,12 +307,10 @@ impl<T: CommandContext> TestRunner<T> {
             } else {
                 TestType::WriteBandwidth
             }
+        } else if self.params.operation_name().contains("latency") {
+            TestType::ReadLatency
         } else {
-            if self.params.operation_name().contains("latency") {
-                TestType::ReadLatency
-            } else {
-                TestType::ReadBandwidth
-            }
+            TestType::ReadBandwidth
         };
 
         let is_latency = test_type.is_latency();
@@ -344,7 +339,7 @@ impl<T: CommandContext> TestRunner<T> {
             )?
         };
 
-        let cq_depth = tx_depth as u32 * qp_count as u32;
+        let cq_depth = tx_depth * qp_count as u32;
         let cq: GenericCompletionQueue = ctx
             .create_cq_builder()
             .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)

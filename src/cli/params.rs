@@ -139,6 +139,12 @@ pub struct SendBandwidthParams {
     base: BaseParams,
 }
 
+impl Default for SendBandwidthParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SendBandwidthParams {
     pub fn new() -> Self {
         let mut base = BaseParams::default();
@@ -178,6 +184,12 @@ impl CommandContext for SendBandwidthParams {
 #[derive(Debug, Clone)]
 pub struct SendLatencyParams {
     base: BaseParams,
+}
+
+impl Default for SendLatencyParams {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SendLatencyParams {
@@ -221,6 +233,12 @@ pub struct WriteBandwidthParams {
     base: BaseParams,
 }
 
+impl Default for WriteBandwidthParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WriteBandwidthParams {
     pub fn new() -> Self {
         let mut base = BaseParams::default();
@@ -260,6 +278,12 @@ impl CommandContext for WriteBandwidthParams {
 #[derive(Debug, Clone)]
 pub struct WriteLatencyParams {
     base: BaseParams,
+}
+
+impl Default for WriteLatencyParams {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WriteLatencyParams {
@@ -303,6 +327,12 @@ pub struct ReadBandwidthParams {
     base: BaseParams,
 }
 
+impl Default for ReadBandwidthParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReadBandwidthParams {
     pub fn new() -> Self {
         Self {
@@ -342,6 +372,12 @@ impl CommandContext for ReadBandwidthParams {
 #[derive(Debug, Clone)]
 pub struct ReadLatencyParams {
     base: BaseParams,
+}
+
+impl Default for ReadLatencyParams {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReadLatencyParams {

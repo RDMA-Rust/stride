@@ -65,16 +65,16 @@ impl ConnectionManager for TcpConnectionManager {
     }
 
     fn listen(&mut self, addr: SocketAddr) -> ConnectionResult<()> {
-        let listener = TcpListener::bind(addr).map_err(|e| ConnectionError::IoError(e))?;
+        let listener = TcpListener::bind(addr).map_err(ConnectionError::IoError)?;
 
         listener
             .set_nonblocking(false)
-            .map_err(|e| ConnectionError::IoError(e))?;
+            .map_err(ConnectionError::IoError)?;
 
         self.local_addr = Some(
             listener
                 .local_addr()
-                .map_err(|e| ConnectionError::IoError(e))?,
+                .map_err(ConnectionError::IoError)?,
         );
 
         self.listener = Some(Arc::new(Mutex::new(listener)));
@@ -91,12 +91,12 @@ impl ConnectionManager for TcpConnectionManager {
                 Ok(stream) => {
                     stream
                         .set_nodelay(true)
-                        .map_err(|e| ConnectionError::IoError(e))?;
+                        .map_err(ConnectionError::IoError)?;
 
                     self.local_addr = Some(
                         stream
                             .local_addr()
-                            .map_err(|e| ConnectionError::IoError(e))?,
+                            .map_err(ConnectionError::IoError)?,
                     );
                     self.peer_addr = Some(addr);
                     self.stream = Some(Arc::new(Mutex::new(stream)));
@@ -126,11 +126,11 @@ impl ConnectionManager for TcpConnectionManager {
             .lock()
             .unwrap()
             .accept()
-            .map_err(|e| ConnectionError::IoError(e))?;
+            .map_err(ConnectionError::IoError)?;
 
         stream
             .set_nodelay(true)
-            .map_err(|e| ConnectionError::IoError(e))?;
+            .map_err(ConnectionError::IoError)?;
 
         self.peer_addr = Some(peer_addr);
         self.stream = Some(Arc::new(Mutex::new(stream)));
@@ -323,14 +323,14 @@ impl ConnectionManager for TcpConnectionManager {
         let size = payload.len() as u64;
         guard
             .write_all(&size.to_le_bytes())
-            .map_err(|e| ConnectionError::IoError(e))?;
+            .map_err(ConnectionError::IoError)?;
 
         // Send the payload
         guard
             .write_all(payload)
-            .map_err(|e| ConnectionError::IoError(e))?;
+            .map_err(ConnectionError::IoError)?;
 
-        guard.flush().map_err(|e| ConnectionError::IoError(e))?;
+        guard.flush().map_err(ConnectionError::IoError)?;
         Ok(())
     }
 
@@ -345,14 +345,14 @@ impl ConnectionManager for TcpConnectionManager {
         let mut size_buffer = [0u8; 8];
         guard
             .read_exact(&mut size_buffer)
-            .map_err(|e| ConnectionError::IoError(e))?;
+            .map_err(ConnectionError::IoError)?;
         let size = u64::from_le_bytes(size_buffer) as usize;
 
         // Read the payload
         let mut buffer = vec![0u8; size];
         guard
             .read_exact(&mut buffer)
-            .map_err(|e| ConnectionError::IoError(e))?;
+            .map_err(ConnectionError::IoError)?;
 
         Ok(buffer)
     }

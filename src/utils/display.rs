@@ -449,7 +449,7 @@ impl ColumnFormatter {
         let max_value_width = fields.iter().map(|f| f.value.len()).max().unwrap_or(0);
 
         let total_fields = fields.len();
-        let total_columns = (total_fields + rows_per_column - 1) / rows_per_column;
+        let total_columns = total_fields.div_ceil(rows_per_column);
 
         Self {
             fields,
