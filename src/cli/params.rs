@@ -37,6 +37,102 @@ impl Default for BaseParams {
     }
 }
 
+macro_rules! impl_command_context_for_base {
+    ($struct_name:ty) => {
+        fn device(&self) -> Option<&str> {
+            self.base.device.as_deref()
+        }
+
+        fn set_device(&mut self, device: String) {
+            self.base.device = Some(device);
+        }
+
+        fn gid_index(&self) -> Option<u8> {
+            self.base.gid_index
+        }
+
+        fn set_gid_index(&mut self, index: u8) {
+            self.base.gid_index = Some(index);
+        }
+
+        fn iterations(&self) -> u32 {
+            self.base.iterations
+        }
+
+        fn set_iterations(&mut self, iters: u32) {
+            self.base.iterations = iters;
+        }
+
+        fn message_size(&self) -> u32 {
+            self.base.message_size
+        }
+
+        fn set_message_size(&mut self, size: u32) {
+            self.base.message_size = size;
+        }
+
+        fn qp_timeout(&self) -> u8 {
+            self.base.qp_timeout
+        }
+
+        fn set_qp_timeout(&mut self, timeout: u8) {
+            self.base.qp_timeout = timeout;
+        }
+
+        fn tx_depth(&self) -> Option<u32> {
+            self.base.tx_depth
+        }
+
+        fn set_tx_depth(&mut self, depth: u32) {
+            self.base.tx_depth = Some(depth);
+        }
+
+        fn rx_depth(&self) -> Option<u32> {
+            self.base.rx_depth
+        }
+
+        fn set_rx_depth(&mut self, depth: u32) {
+            self.base.rx_depth = Some(depth);
+        }
+
+        fn use_immediate_data(&self) -> bool {
+            self.base.use_imm_data
+        }
+
+        fn set_use_immediate_data(&mut self, use_imm: bool) {
+            self.base.use_imm_data = use_imm;
+        }
+
+        fn port(&self) -> Option<u16> {
+            Some(self.base.port)
+        }
+
+        fn set_port(&mut self, port: u16) {
+            self.base.port = port;
+        }
+
+        fn address(&self) -> Option<String> {
+            self.base.address.clone()
+        }
+
+        fn set_address(&mut self, address: String) {
+            self.base.address = Some(address);
+        }
+
+        fn qp_count(&self) -> Option<usize> {
+            Some(self.base.qp_count)
+        }
+
+        fn set_qp_count(&mut self, count: usize) {
+            self.base.qp_count = count;
+        }
+
+        fn bidirectional(&self) -> bool {
+            self.base.bidirectional
+        }
+    };
+}
+
 /// Send bandwidth command parameters
 #[derive(Debug, Clone)]
 pub struct SendBandwidthParams {
@@ -51,136 +147,31 @@ impl SendBandwidthParams {
     }
 
     pub fn from_args(args: &SendBandwidthArgs) -> Self {
-        let mut params = Self::new();
-        params.set_from_common_args(&args.common);
-        params.set_tx_depth(args.tx_depth);
-        if let Some(rx_depth) = args.rx_depth {
-            params.set_rx_depth(rx_depth);
-        }
-        params.set_use_immediate_data(args.imm_data);
+        let mut base = BaseParams::default();
 
-        // New parameters
-        if let Some(addr) = &args.common.address {
-            params.set_address(addr.clone());
-        }
-        params.set_port(args.common.port);
-        params.set_qp_count(args.common.qp_count as usize);
-        params.base.bidirectional = args.common.bidirectional;
+        base.device = args.common.device.clone();
+        base.gid_index = args.common.gid_index;
+        base.iterations = args.common.iters;
+        base.message_size = args.common.msg_size;
+        base.qp_timeout = args.common.qp_timeout;
+        base.address = args.common.address.clone();
+        base.port = args.common.port;
+        base.qp_count = args.common.qp_count as usize;
+        base.bidirectional = args.common.bidirectional;
 
-        params
-    }
+        base.tx_depth = Some(args.tx_depth);
+        base.rx_depth = args.rx_depth;
+        base.use_imm_data = args.imm_data;
 
-    fn set_from_common_args(&mut self, args: &CommonArgs) {
-        if let Some(device) = &args.device {
-            self.set_device(device.clone());
-        }
-        if let Some(gid_index) = args.gid_index {
-            self.set_gid_index(gid_index);
-        }
-        self.set_iterations(args.iters);
-        self.set_message_size(args.msg_size);
-        self.set_qp_timeout(args.qp_timeout);
-        self.base.address = args.address.clone();
-        self.base.port = args.port;
-        self.base.qp_count = args.qp_count as usize;
+        Self { base }
     }
 }
 
 impl CommandContext for SendBandwidthParams {
-    fn device(&self) -> Option<&str> {
-        self.base.device.as_deref()
-    }
-
-    fn set_device(&mut self, device: String) {
-        self.base.device = Some(device);
-    }
-
-    fn gid_index(&self) -> Option<u8> {
-        self.base.gid_index
-    }
-
-    fn set_gid_index(&mut self, index: u8) {
-        self.base.gid_index = Some(index);
-    }
-
-    fn iterations(&self) -> u32 {
-        self.base.iterations
-    }
-
-    fn set_iterations(&mut self, iters: u32) {
-        self.base.iterations = iters;
-    }
-
-    fn message_size(&self) -> u32 {
-        self.base.message_size
-    }
-
-    fn set_message_size(&mut self, size: u32) {
-        self.base.message_size = size;
-    }
-
-    fn qp_timeout(&self) -> u8 {
-        self.base.qp_timeout
-    }
-
-    fn set_qp_timeout(&mut self, timeout: u8) {
-        self.base.qp_timeout = timeout;
-    }
-
-    fn tx_depth(&self) -> Option<u32> {
-        self.base.tx_depth
-    }
-
-    fn set_tx_depth(&mut self, depth: u32) {
-        self.base.tx_depth = Some(depth);
-    }
-
-    fn rx_depth(&self) -> Option<u32> {
-        self.base.rx_depth
-    }
-
-    fn set_rx_depth(&mut self, depth: u32) {
-        self.base.rx_depth = Some(depth);
-    }
-
-    fn use_immediate_data(&self) -> bool {
-        self.base.use_imm_data
-    }
-
-    fn set_use_immediate_data(&mut self, use_imm: bool) {
-        self.base.use_imm_data = use_imm;
-    }
+    impl_command_context_for_base!(SendBandwidthParams);
 
     fn operation_name(&self) -> String {
         "SEND bandwidth test".to_string()
-    }
-
-    fn port(&self) -> Option<u16> {
-        Some(self.base.port)
-    }
-
-    fn set_port(&mut self, port: u16) {
-        self.base.port = port;
-    }
-
-    fn address(&self) -> Option<String> {
-        self.base.address.clone()
-    }
-
-    fn set_address(&mut self, address: String) {
-        self.base.address = Some(address);
-    }
-
-    fn qp_count(&self) -> Option<usize> {
-        Some(self.base.qp_count)
-    }
-
-    fn set_qp_count(&mut self, count: usize) {
-        self.base.qp_count = count;
-    }
-
-    fn bidirectional(&self) -> bool {
-        self.base.bidirectional
     }
 }
 
@@ -197,126 +188,31 @@ impl SendLatencyParams {
     }
 
     pub fn from_args(args: &crate::cli::perf::SendLatencyArgs) -> Self {
-        let mut params = Self::new();
-        params.set_from_common_args(&args.common);
-        if let Some(tx_depth) = args.tx_depth {
-            params.set_tx_depth(tx_depth);
-        }
-        if let Some(rx_depth) = args.rx_depth {
-            params.set_rx_depth(rx_depth);
-        }
-        params.set_use_immediate_data(args.imm_data);
-        params
-    }
+        let mut base = BaseParams::default();
 
-    fn set_from_common_args(&mut self, args: &crate::cli::perf::CommonArgs) {
-        if let Some(device) = &args.device {
-            self.set_device(device.clone());
-        }
-        if let Some(gid_index) = args.gid_index {
-            self.set_gid_index(gid_index);
-        }
-        self.set_iterations(args.iters);
-        self.set_message_size(args.msg_size);
-        self.set_qp_timeout(args.qp_timeout);
+        base.device = args.common.device.clone();
+        base.gid_index = args.common.gid_index;
+        base.iterations = args.common.iters;
+        base.message_size = args.common.msg_size;
+        base.qp_timeout = args.common.qp_timeout;
+        base.address = args.common.address.clone();
+        base.port = args.common.port;
+        base.qp_count = args.common.qp_count as usize;
+        base.bidirectional = args.common.bidirectional;
+
+        base.tx_depth = args.tx_depth;
+        base.rx_depth = args.rx_depth;
+        base.use_imm_data = args.imm_data;
+
+        Self { base }
     }
 }
 
 impl CommandContext for SendLatencyParams {
-    fn device(&self) -> Option<&str> {
-        self.base.device.as_deref()
-    }
-
-    fn set_device(&mut self, device: String) {
-        self.base.device = Some(device);
-    }
-
-    fn gid_index(&self) -> Option<u8> {
-        self.base.gid_index
-    }
-
-    fn set_gid_index(&mut self, index: u8) {
-        self.base.gid_index = Some(index);
-    }
-
-    fn iterations(&self) -> u32 {
-        self.base.iterations
-    }
-
-    fn set_iterations(&mut self, iters: u32) {
-        self.base.iterations = iters;
-    }
-
-    fn message_size(&self) -> u32 {
-        self.base.message_size
-    }
-
-    fn set_message_size(&mut self, size: u32) {
-        self.base.message_size = size;
-    }
-
-    fn qp_timeout(&self) -> u8 {
-        self.base.qp_timeout
-    }
-
-    fn set_qp_timeout(&mut self, timeout: u8) {
-        self.base.qp_timeout = timeout;
-    }
-
-    fn tx_depth(&self) -> Option<u32> {
-        self.base.tx_depth
-    }
-
-    fn set_tx_depth(&mut self, depth: u32) {
-        self.base.tx_depth = Some(depth);
-    }
-
-    fn rx_depth(&self) -> Option<u32> {
-        self.base.rx_depth
-    }
-
-    fn set_rx_depth(&mut self, depth: u32) {
-        self.base.rx_depth = Some(depth);
-    }
-
-    fn use_immediate_data(&self) -> bool {
-        self.base.use_imm_data
-    }
-
-    fn set_use_immediate_data(&mut self, use_imm: bool) {
-        self.base.use_imm_data = use_imm;
-    }
+    impl_command_context_for_base!(SendLatencyParams);
 
     fn operation_name(&self) -> String {
         "SEND latency test".to_string()
-    }
-
-    fn port(&self) -> Option<u16> {
-        Some(self.base.port)
-    }
-
-    fn set_port(&mut self, port: u16) {
-        self.base.port = port;
-    }
-
-    fn address(&self) -> Option<String> {
-        self.base.address.clone()
-    }
-
-    fn set_address(&mut self, address: String) {
-        self.base.address = Some(address);
-    }
-
-    fn qp_count(&self) -> Option<usize> {
-        Some(self.base.qp_count)
-    }
-
-    fn set_qp_count(&mut self, count: usize) {
-        self.base.qp_count = count;
-    }
-
-    fn bidirectional(&self) -> bool {
-        self.base.bidirectional
     }
 }
 
@@ -333,135 +229,31 @@ impl WriteBandwidthParams {
     }
 
     pub fn from_args(args: &crate::cli::perf::WriteBandwidthArgs) -> Self {
-        let mut params = Self::new();
-        params.set_from_common_args(&args.common);
-        params.set_tx_depth(args.tx_depth);
-        params.set_use_immediate_data(args.imm_data);
+        let mut base = BaseParams::default();
 
-        // New parameters
-        if let Some(addr) = &args.common.address {
-            params.set_address(addr.clone());
-        }
-        params.set_port(args.common.port);
-        params.set_qp_count(args.common.qp_count as usize);
-        params.base.bidirectional = args.common.bidirectional;
+        base.device = args.common.device.clone();
+        base.gid_index = args.common.gid_index;
+        base.iterations = args.common.iters;
+        base.message_size = args.common.msg_size;
+        base.qp_timeout = args.common.qp_timeout;
+        base.address = args.common.address.clone();
+        base.port = args.common.port;
+        base.qp_count = args.common.qp_count as usize;
+        base.bidirectional = args.common.bidirectional;
 
-        params
-    }
+        base.tx_depth = Some(args.tx_depth);
+        base.rx_depth = None;
+        base.use_imm_data = args.imm_data;
 
-    fn set_from_common_args(&mut self, args: &CommonArgs) {
-        if let Some(device) = &args.device {
-            self.set_device(device.clone());
-        }
-        if let Some(gid_index) = args.gid_index {
-            self.set_gid_index(gid_index);
-        }
-        self.set_iterations(args.iters);
-        self.set_message_size(args.msg_size);
-        self.set_qp_timeout(args.qp_timeout);
-
-        self.base.address = args.address.clone();
-        self.base.port = args.port;
-        self.base.qp_count = args.qp_count as usize;
+        Self { base }
     }
 }
 
 impl CommandContext for WriteBandwidthParams {
-    // Similar to SendBandwidthParams implementation
-    fn device(&self) -> Option<&str> {
-        self.base.device.as_deref()
-    }
-
-    fn set_device(&mut self, device: String) {
-        self.base.device = Some(device);
-    }
-
-    fn gid_index(&self) -> Option<u8> {
-        self.base.gid_index
-    }
-
-    fn set_gid_index(&mut self, index: u8) {
-        self.base.gid_index = Some(index);
-    }
-
-    fn iterations(&self) -> u32 {
-        self.base.iterations
-    }
-
-    fn set_iterations(&mut self, iters: u32) {
-        self.base.iterations = iters;
-    }
-
-    fn message_size(&self) -> u32 {
-        self.base.message_size
-    }
-
-    fn set_message_size(&mut self, size: u32) {
-        self.base.message_size = size;
-    }
-
-    fn qp_timeout(&self) -> u8 {
-        self.base.qp_timeout
-    }
-
-    fn set_qp_timeout(&mut self, timeout: u8) {
-        self.base.qp_timeout = timeout;
-    }
-
-    fn tx_depth(&self) -> Option<u32> {
-        self.base.tx_depth
-    }
-
-    fn set_tx_depth(&mut self, depth: u32) {
-        self.base.tx_depth = Some(depth);
-    }
-
-    fn rx_depth(&self) -> Option<u32> {
-        self.base.rx_depth
-    }
-
-    fn set_rx_depth(&mut self, depth: u32) {
-        self.base.rx_depth = Some(depth);
-    }
-
-    fn use_immediate_data(&self) -> bool {
-        self.base.use_imm_data
-    }
-
-    fn set_use_immediate_data(&mut self, use_imm: bool) {
-        self.base.use_imm_data = use_imm;
-    }
+    impl_command_context_for_base!(WriteBandwidthParams);
 
     fn operation_name(&self) -> String {
         "WRITE bandwidth test".to_string()
-    }
-
-    fn port(&self) -> Option<u16> {
-        Some(self.base.port)
-    }
-
-    fn set_port(&mut self, port: u16) {
-        self.base.port = port;
-    }
-
-    fn address(&self) -> Option<String> {
-        self.base.address.clone()
-    }
-
-    fn set_address(&mut self, address: String) {
-        self.base.address = Some(address);
-    }
-
-    fn qp_count(&self) -> Option<usize> {
-        Some(self.base.qp_count)
-    }
-
-    fn set_qp_count(&mut self, count: usize) {
-        self.base.qp_count = count;
-    }
-
-    fn bidirectional(&self) -> bool {
-        self.base.bidirectional
     }
 }
 
@@ -478,124 +270,31 @@ impl WriteLatencyParams {
     }
 
     pub fn from_args(args: &crate::cli::perf::WriteLatencyArgs) -> Self {
-        let mut params = Self::new();
-        params.set_from_common_args(&args.common);
-        if let Some(tx_depth) = args.tx_depth {
-            params.set_tx_depth(tx_depth);
-        }
-        params.set_use_immediate_data(args.imm_data);
-        params
-    }
+        let mut base = BaseParams::default();
 
-    fn set_from_common_args(&mut self, args: &CommonArgs) {
-        if let Some(device) = &args.device {
-            self.set_device(device.clone());
-        }
-        if let Some(gid_index) = args.gid_index {
-            self.set_gid_index(gid_index);
-        }
-        self.set_iterations(args.iters);
-        self.set_message_size(args.msg_size);
-        self.set_qp_timeout(args.qp_timeout);
+        base.device = args.common.device.clone();
+        base.gid_index = args.common.gid_index;
+        base.iterations = args.common.iters;
+        base.message_size = args.common.msg_size;
+        base.qp_timeout = args.common.qp_timeout;
+        base.address = args.common.address.clone();
+        base.port = args.common.port;
+        base.qp_count = args.common.qp_count as usize;
+        base.bidirectional = args.common.bidirectional;
+
+        base.tx_depth = args.tx_depth;
+        base.rx_depth = None;
+        base.use_imm_data = args.imm_data;
+
+        Self { base }
     }
 }
 
 impl CommandContext for WriteLatencyParams {
-    // Copy implementation from WriteBandwidthParams
-    fn device(&self) -> Option<&str> {
-        self.base.device.as_deref()
-    }
-
-    fn set_device(&mut self, device: String) {
-        self.base.device = Some(device);
-    }
-
-    fn gid_index(&self) -> Option<u8> {
-        self.base.gid_index
-    }
-
-    fn set_gid_index(&mut self, index: u8) {
-        self.base.gid_index = Some(index);
-    }
-
-    fn iterations(&self) -> u32 {
-        self.base.iterations
-    }
-
-    fn set_iterations(&mut self, iters: u32) {
-        self.base.iterations = iters;
-    }
-
-    fn message_size(&self) -> u32 {
-        self.base.message_size
-    }
-
-    fn set_message_size(&mut self, size: u32) {
-        self.base.message_size = size;
-    }
-
-    fn qp_timeout(&self) -> u8 {
-        self.base.qp_timeout
-    }
-
-    fn set_qp_timeout(&mut self, timeout: u8) {
-        self.base.qp_timeout = timeout;
-    }
-
-    fn tx_depth(&self) -> Option<u32> {
-        self.base.tx_depth
-    }
-
-    fn set_tx_depth(&mut self, depth: u32) {
-        self.base.tx_depth = Some(depth);
-    }
-
-    fn rx_depth(&self) -> Option<u32> {
-        self.base.rx_depth
-    }
-
-    fn set_rx_depth(&mut self, depth: u32) {
-        self.base.rx_depth = Some(depth);
-    }
-
-    fn use_immediate_data(&self) -> bool {
-        self.base.use_imm_data
-    }
-
-    fn set_use_immediate_data(&mut self, use_imm: bool) {
-        self.base.use_imm_data = use_imm;
-    }
+    impl_command_context_for_base!(WriteLatencyParams);
 
     fn operation_name(&self) -> String {
         "WRITE latency test".to_string()
-    }
-
-    fn port(&self) -> Option<u16> {
-        Some(self.base.port)
-    }
-
-    fn set_port(&mut self, port: u16) {
-        self.base.port = port;
-    }
-
-    fn address(&self) -> Option<String> {
-        self.base.address.clone()
-    }
-
-    fn set_address(&mut self, address: String) {
-        self.base.address = Some(address);
-    }
-
-    fn qp_count(&self) -> Option<usize> {
-        Some(self.base.qp_count)
-    }
-
-    fn set_qp_count(&mut self, count: usize) {
-        self.base.qp_count = count;
-    }
-
-    fn bidirectional(&self) -> bool {
-        self.base.bidirectional
     }
 }
 
@@ -612,123 +311,31 @@ impl ReadBandwidthParams {
     }
 
     pub fn from_args(args: &crate::cli::perf::ReadBandwidthArgs) -> Self {
-        let mut params = Self::new();
-        params.set_from_common_args(&args.common);
-        if let Some(tx_depth) = args.tx_depth {
-            params.set_tx_depth(tx_depth);
-        }
-        params
-    }
+        let mut base = BaseParams::default();
 
-    fn set_from_common_args(&mut self, args: &CommonArgs) {
-        if let Some(device) = &args.device {
-            self.set_device(device.clone());
-        }
-        if let Some(gid_index) = args.gid_index {
-            self.set_gid_index(gid_index);
-        }
-        self.set_iterations(args.iters);
-        self.set_message_size(args.msg_size);
-        self.set_qp_timeout(args.qp_timeout);
+        base.device = args.common.device.clone();
+        base.gid_index = args.common.gid_index;
+        base.iterations = args.common.iters;
+        base.message_size = args.common.msg_size;
+        base.qp_timeout = args.common.qp_timeout;
+        base.address = args.common.address.clone();
+        base.port = args.common.port;
+        base.qp_count = args.common.qp_count as usize;
+        base.bidirectional = args.common.bidirectional;
+
+        base.tx_depth = args.tx_depth;
+        base.rx_depth = None;
+        base.use_imm_data = false;
+
+        Self { base }
     }
 }
 
 impl CommandContext for ReadBandwidthParams {
-    // Similar implementation
-    fn device(&self) -> Option<&str> {
-        self.base.device.as_deref()
-    }
-
-    fn set_device(&mut self, device: String) {
-        self.base.device = Some(device);
-    }
-
-    fn gid_index(&self) -> Option<u8> {
-        self.base.gid_index
-    }
-
-    fn set_gid_index(&mut self, index: u8) {
-        self.base.gid_index = Some(index);
-    }
-
-    fn iterations(&self) -> u32 {
-        self.base.iterations
-    }
-
-    fn set_iterations(&mut self, iters: u32) {
-        self.base.iterations = iters;
-    }
-
-    fn message_size(&self) -> u32 {
-        self.base.message_size
-    }
-
-    fn set_message_size(&mut self, size: u32) {
-        self.base.message_size = size;
-    }
-
-    fn qp_timeout(&self) -> u8 {
-        self.base.qp_timeout
-    }
-
-    fn set_qp_timeout(&mut self, timeout: u8) {
-        self.base.qp_timeout = timeout;
-    }
-
-    fn tx_depth(&self) -> Option<u32> {
-        self.base.tx_depth
-    }
-
-    fn set_tx_depth(&mut self, depth: u32) {
-        self.base.tx_depth = Some(depth);
-    }
-
-    fn rx_depth(&self) -> Option<u32> {
-        self.base.rx_depth
-    }
-
-    fn set_rx_depth(&mut self, depth: u32) {
-        self.base.rx_depth = Some(depth);
-    }
-
-    fn use_immediate_data(&self) -> bool {
-        self.base.use_imm_data
-    }
-
-    fn set_use_immediate_data(&mut self, use_imm: bool) {
-        self.base.use_imm_data = use_imm;
-    }
+    impl_command_context_for_base!(ReadBandwidthParams);
 
     fn operation_name(&self) -> String {
         "READ bandwidth test".to_string()
-    }
-
-    fn port(&self) -> Option<u16> {
-        Some(self.base.port)
-    }
-
-    fn set_port(&mut self, port: u16) {
-        self.base.port = port;
-    }
-
-    fn address(&self) -> Option<String> {
-        self.base.address.clone()
-    }
-
-    fn set_address(&mut self, address: String) {
-        self.base.address = Some(address);
-    }
-
-    fn qp_count(&self) -> Option<usize> {
-        Some(self.base.qp_count)
-    }
-
-    fn set_qp_count(&mut self, count: usize) {
-        self.base.qp_count = count;
-    }
-
-    fn bidirectional(&self) -> bool {
-        self.base.bidirectional
     }
 }
 
@@ -745,122 +352,30 @@ impl ReadLatencyParams {
     }
 
     pub fn from_args(args: &crate::cli::perf::ReadLatencyArgs) -> Self {
-        let mut params = Self::new();
-        params.set_from_common_args(&args.common);
-        if let Some(tx_depth) = args.tx_depth {
-            params.set_tx_depth(tx_depth);
-        }
-        params
-    }
+        let mut base = BaseParams::default();
 
-    fn set_from_common_args(&mut self, args: &CommonArgs) {
-        if let Some(device) = &args.device {
-            self.set_device(device.clone());
-        }
-        if let Some(gid_index) = args.gid_index {
-            self.set_gid_index(gid_index);
-        }
-        self.set_iterations(args.iters);
-        self.set_message_size(args.msg_size);
-        self.set_qp_timeout(args.qp_timeout);
+        base.device = args.common.device.clone();
+        base.gid_index = args.common.gid_index;
+        base.iterations = args.common.iters;
+        base.message_size = args.common.msg_size;
+        base.qp_timeout = args.common.qp_timeout;
+        base.address = args.common.address.clone();
+        base.port = args.common.port;
+        base.qp_count = args.common.qp_count as usize;
+        base.bidirectional = args.common.bidirectional;
+
+        base.tx_depth = args.tx_depth;
+        base.rx_depth = None;
+        base.use_imm_data = false;
+
+        Self { base }
     }
 }
 
 impl CommandContext for ReadLatencyParams {
-    // Similar implementation
-    fn device(&self) -> Option<&str> {
-        self.base.device.as_deref()
-    }
-
-    fn set_device(&mut self, device: String) {
-        self.base.device = Some(device);
-    }
-
-    fn gid_index(&self) -> Option<u8> {
-        self.base.gid_index
-    }
-
-    fn set_gid_index(&mut self, index: u8) {
-        self.base.gid_index = Some(index);
-    }
-
-    fn iterations(&self) -> u32 {
-        self.base.iterations
-    }
-
-    fn set_iterations(&mut self, iters: u32) {
-        self.base.iterations = iters;
-    }
-
-    fn message_size(&self) -> u32 {
-        self.base.message_size
-    }
-
-    fn set_message_size(&mut self, size: u32) {
-        self.base.message_size = size;
-    }
-
-    fn qp_timeout(&self) -> u8 {
-        self.base.qp_timeout
-    }
-
-    fn set_qp_timeout(&mut self, timeout: u8) {
-        self.base.qp_timeout = timeout;
-    }
-
-    fn tx_depth(&self) -> Option<u32> {
-        self.base.tx_depth
-    }
-
-    fn set_tx_depth(&mut self, depth: u32) {
-        self.base.tx_depth = Some(depth);
-    }
-
-    fn rx_depth(&self) -> Option<u32> {
-        self.base.rx_depth
-    }
-
-    fn set_rx_depth(&mut self, depth: u32) {
-        self.base.rx_depth = Some(depth);
-    }
-
-    fn use_immediate_data(&self) -> bool {
-        self.base.use_imm_data
-    }
-
-    fn set_use_immediate_data(&mut self, use_imm: bool) {
-        self.base.use_imm_data = use_imm;
-    }
+    impl_command_context_for_base!(ReadLatencyParams);
 
     fn operation_name(&self) -> String {
         "READ latency test".to_string()
-    }
-
-    fn port(&self) -> Option<u16> {
-        Some(self.base.port)
-    }
-
-    fn set_port(&mut self, port: u16) {
-        self.base.port = port;
-    }
-
-    fn address(&self) -> Option<String> {
-        self.base.address.clone()
-    }
-
-    fn set_address(&mut self, address: String) {
-        self.base.address = Some(address);
-    }
-
-    fn qp_count(&self) -> Option<usize> {
-        Some(self.base.qp_count)
-    }
-
-    fn set_qp_count(&mut self, count: usize) {
-        self.base.qp_count = count;
-    }
-
-    fn bidirectional(&self) -> bool {
-        self.base.bidirectional
     }
 }

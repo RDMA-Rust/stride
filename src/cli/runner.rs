@@ -72,7 +72,7 @@ impl<T: CommandContext> TestRunner<T> {
             ConnectionSession::new("tcp", ctx.clone(), pd.clone(), conn_params, gid_index)?;
 
         // Initialize the connection session
-        session.initialize();
+        let _ = session.initialize();
 
         // Establish connection
         let address = if server_mode {
@@ -251,9 +251,6 @@ impl<T: CommandContext> TestRunner<T> {
         let mut qp_iterations = vec![0u32; qp_count];
         let mut inflight_per_qp = vec![0u32; qp_count];
         let total_target_iterations = iterations_per_qp * qp_count as u32;
-
-        let clock = Clock::new();
-        let start_time = clock.now();
 
         if is_bidirectional || !is_server {
             let clock = Clock::new();

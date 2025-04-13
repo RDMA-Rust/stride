@@ -1,7 +1,11 @@
 use sideway::ibverbs::address::Gid;
 use std::fmt::Display;
 use tabled::{
-    settings::{object::Columns, Style, Width},
+    settings::{
+        object::{Columns, Rows},
+        style::HorizontalLine,
+        Border, Style, Width,
+    },
     Table, Tabled,
 };
 
@@ -241,10 +245,8 @@ impl DisplayOutput {
             ));
         }
 
-        unsafe {
-            output.push_str(&format!("Local  GID: GID: {}\n", self.gid_info[0],));
-            output.push_str(&format!("Remote GID: GID: {}", self.gid_info[1],));
-        }
+        output.push_str(&format!("Local  GID: GID: {}\n", self.gid_info[0],));
+        output.push_str(&format!("Remote GID: GID: {}", self.gid_info[1],));
 
         output
     }
@@ -269,6 +271,12 @@ impl DisplayOutput {
             )
         );
         println!("{}\n", self.format_qp_details());
+
+        let style = Style::ascii()
+        .remove_top()
+        .remove_left()
+        .remove_right()
+        .intersection_bottom('-');
 
         if let Some(results) = &self.bw_results {
             println!(
@@ -307,7 +315,7 @@ impl DisplayOutput {
 
             // Improved table formatting with constants
             let table = Table::new([results])
-                .with(Style::psql())
+                .with(style)
                 .with(Width::increase(table_width))
                 .modify(Columns::single(0), Width::truncate(SIZE_COLUMN_WIDTH))
                 .modify(Columns::single(0), Width::increase(SIZE_COLUMN_WIDTH))
@@ -334,8 +342,8 @@ impl DisplayOutput {
                 )
             );
 
-            let mut table = Table::new([results])
-                .with(Style::psql())
+            let table = Table::new([results])
+                .with(style)
                 .with(Width::increase(header_width!()))
                 .to_string();
 
