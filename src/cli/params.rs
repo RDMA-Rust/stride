@@ -180,7 +180,8 @@ impl SendBandwidthParams {
         base.iterations = args.common.iters;
         base.message_size = args.common.msg_size;
         base.qp_timeout = args.common.qp_timeout;
-        base.address = args.common.address.clone();
+        // Use server_address for client/server determination
+        base.address = args.common.server_address.clone();
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
@@ -229,7 +230,8 @@ impl SendLatencyParams {
         base.iterations = args.common.iters;
         base.message_size = args.common.msg_size;
         base.qp_timeout = args.common.qp_timeout;
-        base.address = args.common.address.clone();
+        // Use server_address for client/server determination
+        base.address = args.common.server_address.clone();
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
@@ -278,7 +280,8 @@ impl WriteBandwidthParams {
         base.iterations = args.common.iters;
         base.message_size = args.common.msg_size;
         base.qp_timeout = args.common.qp_timeout;
-        base.address = args.common.address.clone();
+        // Use server_address for client/server determination
+        base.address = args.common.server_address.clone();
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
@@ -327,7 +330,8 @@ impl WriteLatencyParams {
         base.iterations = args.common.iters;
         base.message_size = args.common.msg_size;
         base.qp_timeout = args.common.qp_timeout;
-        base.address = args.common.address.clone();
+        // Use server_address for client/server determination
+        base.address = args.common.server_address.clone();
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
@@ -376,7 +380,8 @@ impl ReadBandwidthParams {
         base.iterations = args.common.iters;
         base.message_size = args.common.msg_size;
         base.qp_timeout = args.common.qp_timeout;
-        base.address = args.common.address.clone();
+        // Use server_address for client/server determination
+        base.address = args.common.server_address.clone();
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
@@ -425,7 +430,8 @@ impl ReadLatencyParams {
         base.iterations = args.common.iters;
         base.message_size = args.common.msg_size;
         base.qp_timeout = args.common.qp_timeout;
-        base.address = args.common.address.clone();
+        // Use server_address for client/server determination
+        base.address = args.common.server_address.clone();
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;

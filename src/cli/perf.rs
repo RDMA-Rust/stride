@@ -132,9 +132,9 @@ pub struct CommonArgs {
     /// Port number for connections
     #[arg(long, short = 'p', default_value_t = 18515)]
     pub port: u16,
-    /// Target address for client connections
-    #[arg(long, short = 'a', default_value = None)]
-    pub address: Option<String>,
+    /// Server address (if specified, run as client connecting to this server)
+    #[arg(index = 1)]
+    pub server_address: Option<String>,
     /// Number of queue pairs to use
     #[arg(long, short = 'q', default_value_t = 1)]
     pub qp_count: u32,
@@ -142,7 +142,7 @@ pub struct CommonArgs {
     #[arg(long, short = 'b', default_value_t = false)]
     pub bidirectional: bool,
     /// Run test with all message sizes (2 bytes to 32 MiB)
-    #[arg(long, short = 'A')]
+    #[arg(long, short = 'a')]
     pub all_sizes: bool,
     /// Multiplier between message sizes when using --all-sizes (default is 2x)
     #[arg(long, default_value_t = 2.0)]
