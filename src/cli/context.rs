@@ -47,6 +47,26 @@ pub trait CommandContext {
     /// Set whether immediate data should be used
     fn set_use_immediate_data(&mut self, use_imm: bool);
 
+    /// Whether to run the test with all message sizes
+    fn all_sizes(&self) -> bool {
+        false
+    }
+
+    /// Set whether to run the test with all message sizes
+    fn set_all_sizes(&mut self, _all_sizes: bool) {
+        // Default implementation does nothing
+    }
+
+    /// Get the step factor for message sizes when running all sizes
+    fn step_factor(&self) -> f64 {
+        2.0
+    }
+
+    /// Set the step factor for message sizes
+    fn set_step_factor(&mut self, _factor: f64) {
+        // Default implementation does nothing
+    }
+
     /// Create a descriptive name for this operation
     fn operation_name(&self) -> String;
 

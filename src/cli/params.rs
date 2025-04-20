@@ -16,6 +16,8 @@ pub struct BaseParams {
     port: u16,
     qp_count: usize,
     bidirectional: bool,
+    all_sizes: bool,
+    step_factor: f64,
 }
 
 impl Default for BaseParams {
@@ -33,6 +35,8 @@ impl Default for BaseParams {
             port: 18515,
             qp_count: 1,
             bidirectional: false,
+            all_sizes: false,
+            step_factor: 2.0,
         }
     }
 }
@@ -103,6 +107,22 @@ macro_rules! impl_command_context_for_base {
             self.base.use_imm_data = use_imm;
         }
 
+        fn all_sizes(&self) -> bool {
+            self.base.all_sizes
+        }
+
+        fn set_all_sizes(&mut self, all_sizes: bool) {
+            self.base.all_sizes = all_sizes;
+        }
+
+        fn step_factor(&self) -> f64 {
+            self.base.step_factor
+        }
+
+        fn set_step_factor(&mut self, factor: f64) {
+            self.base.step_factor = factor;
+        }
+
         fn port(&self) -> Option<u16> {
             Some(self.base.port)
         }
@@ -164,6 +184,8 @@ impl SendBandwidthParams {
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
+        base.all_sizes = args.common.all_sizes;
+        base.step_factor = args.common.step_factor;
 
         base.tx_depth = Some(args.tx_depth);
         base.rx_depth = args.rx_depth;
@@ -211,6 +233,8 @@ impl SendLatencyParams {
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
+        base.all_sizes = args.common.all_sizes;
+        base.step_factor = args.common.step_factor;
 
         base.tx_depth = args.tx_depth;
         base.rx_depth = args.rx_depth;
@@ -258,6 +282,8 @@ impl WriteBandwidthParams {
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
+        base.all_sizes = args.common.all_sizes;
+        base.step_factor = args.common.step_factor;
 
         base.tx_depth = Some(args.tx_depth);
         base.rx_depth = None;
@@ -305,6 +331,8 @@ impl WriteLatencyParams {
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
+        base.all_sizes = args.common.all_sizes;
+        base.step_factor = args.common.step_factor;
 
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;
@@ -352,6 +380,8 @@ impl ReadBandwidthParams {
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
+        base.all_sizes = args.common.all_sizes;
+        base.step_factor = args.common.step_factor;
 
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;
@@ -399,6 +429,8 @@ impl ReadLatencyParams {
         base.port = args.common.port;
         base.qp_count = args.common.qp_count as usize;
         base.bidirectional = args.common.bidirectional;
+        base.all_sizes = args.common.all_sizes;
+        base.step_factor = args.common.step_factor;
 
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;

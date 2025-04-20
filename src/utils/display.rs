@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sideway::ibverbs::address::Gid;
 use std::fmt::Display;
 use tabled::{
-    settings::{object::Columns, Style, Width},
+    settings::{object::Columns, style::HorizontalLine, Style, Width},
     Table, Tabled,
 };
 
@@ -98,7 +98,7 @@ impl Display for TestType {
     }
 }
 
-#[derive(Tabled)]
+#[derive(Tabled, Clone)]
 pub struct QueuePairDetail {
     pub qp_index: u32,
     pub local_qpn: u32,
@@ -180,6 +180,9 @@ pub struct DisplayOutput {
     gid_info: Vec<Gid>,
     bw_results: Option<BandwidthResult>,
     lat_results: Option<LatencyResult>,
+    // Collections for multiple results when using --all-sizes
+    bw_results_collection: Vec<BandwidthResult>,
+    lat_results_collection: Vec<LatencyResult>,
 }
 
 fn format_bandwidth(f: &f64) -> String {
@@ -244,6 +247,8 @@ impl DisplayOutput {
             gid_info,
             bw_results: None,
             lat_results: None,
+            bw_results_collection: Vec::new(),
+            lat_results_collection: Vec::new(),
         }
     }
 
@@ -253,6 +258,134 @@ impl DisplayOutput {
 
     pub fn set_latency_results(&mut self, results: LatencyResult) {
         self.lat_results = Some(results);
+    }
+
+    // Add a bandwidth result to the collection for all-sizes mode
+    pub fn add_bandwidth_result(&mut self, results: BandwidthResult) {
+        self.bw_results_collection.push(results);
+    }
+
+    // Add a latency result to the collection for all-sizes mode
+    pub fn add_latency_result(&mut self, results: LatencyResult) {
+        self.lat_results_collection.push(results);
+    }
+
+    // Display a consolidated table of bandwidth results
+    pub fn display_bandwidth_collection(&self, header_width: usize) {
+        if self.bw_results_collection.is_empty() {
+            return;
+        }
+
+        println!(
+            "{}",
+            create_header("Bandwidth Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
+        );
+
+        // Use header width for the table width
+        let table_width = header_width;
+
+        // Calculate remaining width for the last column
+        let defined_width = SIZE_COLUMN_WIDTH
+            + ITERATIONS_COLUMN_WIDTH
+            + BANDWIDTH_COLUMN_WIDTH
+            + MSG_RATE_COLUMN_WIDTH
+            + (SEPARATOR_WIDTH * (COLUMN_COUNT - 1))
+            + START_AND_END_SPACES_WIDTH;
+
+        let remaining_width = table_width.saturating_sub(defined_width);
+        let time_column_width = std::cmp::max(10, remaining_width);
+
+        // Style for the table
+        let style = Style::ascii()
+            .horizontals([(1, HorizontalLine::inherit(Style::modern()).horizontal('-'))])
+            .remove_top()
+            .remove_left()
+            .remove_right()
+            .remove_horizontal()
+            .intersection_bottom('-');
+
+        // Create table with multiple rows
+        let table = Table::new(self.bw_results_collection.clone())
+            .with(style)
+            .with(Width::increase(table_width))
+            .modify(Columns::single(0), Width::truncate(SIZE_COLUMN_WIDTH))
+            .modify(Columns::single(0), Width::increase(SIZE_COLUMN_WIDTH))
+            .modify(Columns::single(1), Width::truncate(ITERATIONS_COLUMN_WIDTH))
+            .modify(Columns::single(1), Width::increase(ITERATIONS_COLUMN_WIDTH))
+            .modify(Columns::single(2), Width::truncate(BANDWIDTH_COLUMN_WIDTH))
+            .modify(Columns::single(2), Width::increase(BANDWIDTH_COLUMN_WIDTH))
+            .modify(Columns::single(3), Width::truncate(MSG_RATE_COLUMN_WIDTH))
+            .modify(Columns::single(3), Width::increase(MSG_RATE_COLUMN_WIDTH))
+            .modify(Columns::single(4), Width::truncate(time_column_width))
+            .modify(Columns::single(4), Width::increase(time_column_width))
+            .to_string();
+
+        println!("{}", table);
+    }
+
+    // Display a consolidated table of latency results
+    pub fn display_latency_collection(&self, header_width: usize) {
+        if self.lat_results_collection.is_empty() {
+            return;
+        }
+
+        println!(
+            "{}",
+            create_header("Latency Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
+        );
+
+        // Use header width for the table width
+        let table_width = header_width;
+
+        // Calculate remaining width for the last column
+        let defined_width = LAT_SIZE_COLUMN_WIDTH
+            + LAT_ITER_COLUMN_WIDTH
+            + LAT_MIN_COLUMN_WIDTH
+            + LAT_MAX_COLUMN_WIDTH
+            + LAT_TYP_COLUMN_WIDTH
+            + LAT_AVG_COLUMN_WIDTH
+            + LAT_STDEV_COLUMN_WIDTH
+            + LAT_P99_COLUMN_WIDTH
+            + (SEPARATOR_WIDTH * (LAT_COLUMN_COUNT - 1))
+            + START_AND_END_SPACES_WIDTH;
+
+        let remaining_width = table_width.saturating_sub(defined_width);
+        let p999_column_width = std::cmp::max(10, remaining_width);
+
+        // Style for the table
+        let style = Style::ascii()
+            .horizontals([(1, HorizontalLine::inherit(Style::modern()).horizontal('-'))])
+            .remove_top()
+            .remove_left()
+            .remove_right()
+            .remove_horizontal()
+            .intersection_bottom('-');
+
+        // Create table with multiple rows
+        let table = Table::new(self.lat_results_collection.clone())
+            .with(style)
+            .with(Width::increase(header_width))
+            .modify(Columns::single(0), Width::truncate(LAT_SIZE_COLUMN_WIDTH))
+            .modify(Columns::single(0), Width::increase(LAT_SIZE_COLUMN_WIDTH))
+            .modify(Columns::single(1), Width::truncate(LAT_ITER_COLUMN_WIDTH))
+            .modify(Columns::single(1), Width::increase(LAT_ITER_COLUMN_WIDTH))
+            .modify(Columns::single(2), Width::truncate(LAT_MIN_COLUMN_WIDTH))
+            .modify(Columns::single(2), Width::increase(LAT_MIN_COLUMN_WIDTH))
+            .modify(Columns::single(3), Width::truncate(LAT_MAX_COLUMN_WIDTH))
+            .modify(Columns::single(3), Width::increase(LAT_MAX_COLUMN_WIDTH))
+            .modify(Columns::single(4), Width::truncate(LAT_TYP_COLUMN_WIDTH))
+            .modify(Columns::single(4), Width::increase(LAT_TYP_COLUMN_WIDTH))
+            .modify(Columns::single(5), Width::truncate(LAT_AVG_COLUMN_WIDTH))
+            .modify(Columns::single(5), Width::increase(LAT_AVG_COLUMN_WIDTH))
+            .modify(Columns::single(6), Width::truncate(LAT_STDEV_COLUMN_WIDTH))
+            .modify(Columns::single(6), Width::increase(LAT_STDEV_COLUMN_WIDTH))
+            .modify(Columns::single(7), Width::truncate(LAT_P99_COLUMN_WIDTH))
+            .modify(Columns::single(7), Width::increase(LAT_P99_COLUMN_WIDTH))
+            .modify(Columns::single(8), Width::truncate(p999_column_width))
+            .modify(Columns::single(8), Width::increase(p999_column_width))
+            .to_string();
+
+        println!("{}", table);
     }
 
     fn format_qp_details(&self) -> String {
@@ -295,9 +428,11 @@ impl DisplayOutput {
         println!("{}\n", self.format_qp_details());
 
         let style = Style::ascii()
+            .horizontals([(1, HorizontalLine::inherit(Style::modern()).horizontal('-'))])
             .remove_top()
             .remove_left()
             .remove_right()
+            .remove_horizontal()
             .intersection_bottom('-');
 
         if let Some(results) = &self.bw_results {
@@ -410,6 +545,14 @@ impl DisplayOutput {
                 .to_string();
 
             println!("{}", table);
+        }
+
+        if self.bw_results_collection.len() > 0 {
+            self.display_bandwidth_collection(header_width);
+        }
+
+        if self.lat_results_collection.len() > 0 {
+            self.display_latency_collection(header_width);
         }
     }
 }

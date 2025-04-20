@@ -287,13 +287,38 @@ impl<T: CommandContext> TestRunner<T> {
         // Default device fallback
         let device_name = self.params.device();
         let iterations = self.params.iterations();
-        let msg_size = self.params.message_size();
+        let base_msg_size = self.params.message_size();
         let tx_depth = self.params.tx_depth().unwrap_or(512);
         let qp_count = self.params.qp_count().unwrap_or(1);
 
-        let ctx = Arc::new(open_device_context(device_name)?);
-        let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
+        // Handle the all_sizes option
+        let msg_sizes = if self.params.all_sizes() {
+            // Generate all message sizes from 2 bytes to 32 MiB
+            let mut sizes = Vec::new();
+            let step_factor = self.params.step_factor();
+            let mut size = 2; // Start with 2 bytes
 
+            while size <= 33_554_432 {
+                // 32 MiB
+                sizes.push(size);
+                // Use ceiling to ensure we don't get stuck at small sizes
+                size = (size as f64 * step_factor).ceil() as u32;
+            }
+
+            // Make sure we have the exact 32 MiB size at the end
+            if sizes.last() != Some(&33_554_432) {
+                sizes.push(33_554_432);
+            }
+
+            sizes
+        } else {
+            // Just use the single specified message size
+            vec![base_msg_size]
+        };
+
+        println!("Will test {} message sizes", msg_sizes.len());
+
+        let ctx = Arc::new(open_device_context(device_name)?);
         // Determine test type
         let test_type = if self.params.operation_name().contains("SEND") {
             if self.params.operation_name().contains("latency") {
@@ -316,19 +341,9 @@ impl<T: CommandContext> TestRunner<T> {
         let is_latency = test_type.is_latency();
         let tx_depth = if is_latency { 1 } else { tx_depth };
 
-        // Create placeholder QP details (will be updated during connection setup)
-        let mut qp_details = Vec::with_capacity(qp_count);
-        for i in 0..qp_count {
-            qp_details.push(QueuePairDetail {
-                qp_index: i as u32,
-                local_qpn: 0, // Will be filled in after QP creation
-                local_psn: random::generate_psn(),
-                remote_qpn: 0, // Will be filled in after connection
-                remote_psn: 0, // Will be filled in after connection
-            });
-        }
-
-        let buffer_size = tx_depth as usize * msg_size as usize * qp_count;
+        // Allocate the largest buffer we'll need based on the maximum message size
+        let max_msg_size = *msg_sizes.iter().max().unwrap_or(&base_msg_size);
+        let buffer_size = tx_depth as usize * max_msg_size as usize * qp_count;
         let memory = SystemMemory::new(buffer_size, None)?;
         let pd = Arc::new(ctx.alloc_pd()?);
         let mr = unsafe {
@@ -349,8 +364,24 @@ impl<T: CommandContext> TestRunner<T> {
 
         let mut builder = pd.create_qp_builder();
         let qp_count = self.params.qp_count().unwrap_or(1);
-        let mut qps: Vec<GenericQueuePair> = Vec::with_capacity(qp_count);
 
+        // Create a new histogram for all tests
+        let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
+
+        // Create placeholder QP details (will be updated during connection setup)
+        let mut qp_details = Vec::with_capacity(qp_count);
+        for i in 0..qp_count {
+            qp_details.push(QueuePairDetail {
+                qp_index: i as u32,
+                local_qpn: 0, // Will be filled in after QP creation
+                local_psn: random::generate_psn(),
+                remote_qpn: 0, // Will be filled in after connection
+                remote_psn: 0, // Will be filled in after connection
+            });
+        }
+
+        // Create queue pairs
+        let mut qps: Vec<GenericQueuePair> = Vec::with_capacity(qp_count);
         for _ in 0..qp_count {
             let qp = builder
                 .setup_max_inline_data(128)
@@ -367,206 +398,299 @@ impl<T: CommandContext> TestRunner<T> {
             .setup_connection(ctx.clone(), pd.clone(), &mut qps, &mr, &mut qp_details)
             .unwrap();
 
-        // Create test configuration
-        let config = TestConfiguration {
-            device: ctx.name(),
-            transport: ctx.transport_type().to_string(),
-            qp_count: qp_count as u32,
-            connection_type: "RC".to_string(),
-            mtu: conn_result.actual_mtu,
-            gid_type: format!("{:?}", conn_result.gid_type),
-            rx_depth: self.params.rx_depth().unwrap_or(512),
-            tx_depth,
-            test_type,
+        // Create a shared DisplayOutput for consolidated results if using all_sizes
+        let mut shared_display = if self.params.all_sizes() {
+            // If we're using all_sizes, we'll create one shared DisplayOutput for all results
+            let config = TestConfiguration {
+                device: ctx.name(),
+                transport: ctx.transport_type().to_string(),
+                qp_count: qp_count as u32,
+                connection_type: "RC".to_string(),
+                mtu: conn_result.actual_mtu,
+                gid_type: format!("{:?}", conn_result.gid_type),
+                rx_depth: self.params.rx_depth().unwrap_or(512),
+                tx_depth,
+                test_type,
+            };
+
+            Some(DisplayOutput::new(
+                config,
+                qp_details.clone(),
+                vec![conn_result.local_gid, conn_result.remote_gid],
+            ))
+        } else {
+            None
         };
 
-        let gid_info = vec![conn_result.local_gid, conn_result.remote_gid];
-        let mut display = DisplayOutput::new(config, qp_details, gid_info);
+        for msg_size in msg_sizes {
+            println!("\nTesting message size: {} bytes", msg_size);
 
-        let is_server = self.params.server_mode();
-        let is_bidirectional = self.params.bidirectional();
-        let remote_mr = conn_result.remote_mr;
+            // Reset the histogram for each size
+            histogram.reset();
 
-        let iterations_per_qp = iterations;
-        let mut qp_iterations = vec![0u32; qp_count];
-        let mut inflight_per_qp = vec![0u32; qp_count];
-        let total_target_iterations = iterations_per_qp * qp_count as u32;
+            // Create individual test display for this message size (or reuse the shared one)
+            let mut display = if shared_display.is_none() {
+                // Only create new display if not using the shared one
+                DisplayOutput::new(
+                    TestConfiguration {
+                        device: ctx.name(),
+                        transport: ctx.transport_type().to_string(),
+                        qp_count: qp_count as u32,
+                        connection_type: "RC".to_string(),
+                        mtu: conn_result.actual_mtu,
+                        gid_type: format!("{:?}", conn_result.gid_type),
+                        rx_depth: self.params.rx_depth().unwrap_or(512),
+                        tx_depth,
+                        test_type,
+                    },
+                    qp_details.clone(),
+                    vec![conn_result.local_gid, conn_result.remote_gid],
+                )
+            } else {
+                // When using all-sizes mode, this is just a dummy display since we use shared_display
+                DisplayOutput::new(
+                    TestConfiguration {
+                        device: ctx.name(),
+                        transport: ctx.transport_type().to_string(),
+                        qp_count: qp_count as u32,
+                        connection_type: "RC".to_string(),
+                        mtu: conn_result.actual_mtu,
+                        gid_type: format!("{:?}", conn_result.gid_type),
+                        rx_depth: self.params.rx_depth().unwrap_or(512),
+                        tx_depth,
+                        test_type,
+                    },
+                    Vec::new(),
+                    Vec::new(),
+                )
+            };
 
-        if is_bidirectional || !is_server {
-            let clock = Clock::new();
-            let start_time = clock.now();
+            let is_server = self.params.server_mode();
+            let is_bidirectional = self.params.bidirectional();
+            let remote_mr = conn_result.remote_mr;
 
-            // Execute the test based on operation type
-            let is_write = self.params.operation_name().contains("WRITE");
+            let iterations_per_qp = iterations;
+            let mut qp_iterations = vec![0u32; qp_count];
+            let mut inflight_per_qp = vec![0u32; qp_count];
+            let total_target_iterations = iterations_per_qp * qp_count as u32;
 
-            let mut all_completed = false;
+            if is_bidirectional || !is_server {
+                let clock = Clock::new();
+                let start_time = clock.now();
 
-            let mut min_latency_ns: u64 = u64::MAX;
-            let mut max_latency_ns: u64 = 0;
-            let mut operation_start_time = None;
+                // Execute the test based on operation type
+                let is_write = self.params.operation_name().contains("WRITE");
 
-            while !all_completed {
-                // Post operations to all QPs that have space in their queue
-                for qp_idx in 0..qp_count {
-                    // Skip if this QP has completed all iterations
-                    if qp_iterations[qp_idx] >= iterations_per_qp {
-                        continue;
-                    }
+                let mut all_completed = false;
 
-                    // Post operations until tx_depth is reached or iterations are complete
-                    while inflight_per_qp[qp_idx] < tx_depth
-                        && qp_iterations[qp_idx] < iterations_per_qp
-                    {
-                        operation_start_time = if is_latency { Some(clock.now()) } else { None };
+                let mut min_latency_ns: u64 = u64::MAX;
+                let mut max_latency_ns: u64 = 0;
+                let mut operation_start_time = None;
 
-                        let mut guard = qps[qp_idx].start_post_send();
-
-                        // Calculate buffer offset - each QP has its own buffer region
-                        let buffer_region_size = tx_depth as usize * msg_size as usize;
-                        let qp_offset = qp_idx * buffer_region_size;
-                        let iter_offset =
-                            (qp_iterations[qp_idx] % tx_depth) as usize * msg_size as usize;
-                        let total_offset = qp_offset + iter_offset;
-
-                        let local_addr = mr.get_ptr() as u64 + total_offset as u64;
-
-                        let wr_id = ((qp_idx as u64) << 32) | (qp_iterations[qp_idx] as u64);
-
-                        // For WRITE operations, use remote memory info
-                        let send_handle = if is_write {
-                            // Remote memory layout should match local layout
-                            let remote_offset = total_offset % conn_result.remote_mr.size;
-                            let remote_addr = remote_mr.addr + remote_offset as u64;
-
-                            guard
-                                .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                                .setup_write(remote_mr.rkey, remote_addr)
-                        } else {
-                            guard
-                                .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                                .setup_send()
-                        };
-
-                        // Setup scatter-gather entry
-                        unsafe {
-                            send_handle.setup_sge(mr.lkey(), local_addr, msg_size);
+                while !all_completed {
+                    // Post operations to all QPs that have space in their queue
+                    for qp_idx in 0..qp_count {
+                        // Skip if this QP has completed all iterations
+                        if qp_iterations[qp_idx] >= iterations_per_qp {
+                            continue;
                         }
 
-                        guard.post()?;
+                        // Post operations until tx_depth is reached or iterations are complete
+                        while inflight_per_qp[qp_idx] < tx_depth
+                            && qp_iterations[qp_idx] < iterations_per_qp
+                        {
+                            operation_start_time =
+                                if is_latency { Some(clock.now()) } else { None };
 
-                        qp_iterations[qp_idx] += 1;
-                        inflight_per_qp[qp_idx] += 1;
+                            let mut guard = qps[qp_idx].start_post_send();
+
+                            // Calculate buffer offset - each QP has its own buffer region
+                            let buffer_region_size = tx_depth as usize * msg_size as usize;
+                            let qp_offset = qp_idx * buffer_region_size;
+                            let iter_offset =
+                                (qp_iterations[qp_idx] % tx_depth) as usize * msg_size as usize;
+                            let total_offset = qp_offset + iter_offset;
+
+                            let local_addr = mr.get_ptr() as u64 + total_offset as u64;
+
+                            let wr_id = ((qp_idx as u64) << 32) | (qp_iterations[qp_idx] as u64);
+
+                            // For WRITE operations, use remote memory info
+                            let send_handle = if is_write {
+                                // Remote memory layout should match local layout
+                                let remote_offset = total_offset % conn_result.remote_mr.size;
+                                let remote_addr = remote_mr.addr + remote_offset as u64;
+
+                                guard
+                                    .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                                    .setup_write(remote_mr.rkey, remote_addr)
+                            } else {
+                                guard
+                                    .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                                    .setup_send()
+                            };
+
+                            // Setup scatter-gather entry
+                            unsafe {
+                                send_handle.setup_sge(mr.lkey(), local_addr, msg_size);
+                            }
+
+                            guard.post()?;
+
+                            qp_iterations[qp_idx] += 1;
+                            inflight_per_qp[qp_idx] += 1;
+                        }
+                    }
+
+                    if is_latency {
+                        let start_time = operation_start_time.unwrap();
+                        self.wait_for_completion(
+                            &cq,
+                            start_time,
+                            &mut histogram,
+                            &mut min_latency_ns,
+                            &mut max_latency_ns,
+                            &mut inflight_per_qp,
+                            &clock,
+                        )?;
+                    } else {
+                        self.poll_completions(&cq, &mut inflight_per_qp)?;
+                    }
+
+                    all_completed = true;
+                    for qp_idx in 0..qp_count {
+                        if qp_iterations[qp_idx] < iterations_per_qp || inflight_per_qp[qp_idx] > 0
+                        {
+                            all_completed = false;
+                            break;
+                        }
                     }
                 }
+
+                let end_time = clock.now();
+                let time = end_time.duration_since(start_time);
+
+                let total_iterations: u32 = qp_iterations.iter().sum();
+                assert_eq!(
+                    total_iterations, total_target_iterations,
+                    "Iteration count mismatch: expected {}, got {}",
+                    total_target_iterations, total_iterations
+                );
 
                 if is_latency {
-                    let start_time = operation_start_time.unwrap();
-                    self.wait_for_completion(
-                        &cq,
-                        start_time,
-                        &mut histogram,
-                        &mut min_latency_ns,
-                        &mut max_latency_ns,
-                        &mut inflight_per_qp,
-                        &clock,
-                    )?;
-                } else {
-                    self.poll_completions(&cq, &mut inflight_per_qp)?;
-                }
+                    let lat_results = self.calculate_latency_results(
+                        msg_size,
+                        total_iterations,
+                        &histogram,
+                        min_latency_ns,
+                        max_latency_ns,
+                    );
 
-                all_completed = true;
-                for qp_idx in 0..qp_count {
-                    if qp_iterations[qp_idx] < iterations_per_qp || inflight_per_qp[qp_idx] > 0 {
-                        all_completed = false;
-                        break;
+                    if let Some(shared) = &mut shared_display {
+                        // Add to collection for consolidated display at the end
+                        shared.add_latency_result(lat_results.clone());
+                    } else {
+                        // Set single result (legacy mode)
+                        display.set_latency_results(lat_results.clone());
+                    }
+
+                    if !is_bidirectional && !is_server {
+                        // Convert to TestResults for sending to server
+                        let test_results = TestResults {
+                            test_type: crate::connection::exchange::TestType::Latency,
+                            size: msg_size,
+                            iterations: total_iterations,
+                            time: format!("{:.2}", time.as_secs_f64()),
+                            bandwidth_result: None,
+                            latency_result: Some(lat_results),
+                        };
+
+                        // Use the existing session to send results
+                        session.send_results(&test_results)?;
+                    }
+                } else {
+                    let bw_results = self.calculate_bandwidth_results(
+                        msg_size,
+                        total_iterations,
+                        time.as_secs_f64(),
+                    );
+
+                    if let Some(shared) = &mut shared_display {
+                        // Add to collection for consolidated display at the end
+                        shared.add_bandwidth_result(bw_results.clone());
+                    } else {
+                        // Set single result (legacy mode)
+                        display.set_bandwidth_results(bw_results.clone());
+                    }
+
+                    // If client in unidirectional mode, send results to server
+                    if !is_bidirectional && !is_server {
+                        let test_results = TestResults {
+                            test_type: crate::connection::exchange::TestType::Bandwidth,
+                            size: msg_size,
+                            iterations: total_iterations,
+                            time: format!("{:.2}", time.as_secs_f64()),
+                            bandwidth_result: Some(bw_results),
+                            latency_result: None,
+                        };
+
+                        // Use the existing session to send results
+                        session.send_results(&test_results)?;
                     }
                 }
-            }
 
-            let end_time = clock.now();
-            let time = end_time.duration_since(start_time);
-
-            let total_iterations: u32 = qp_iterations.iter().sum();
-            assert_eq!(
-                total_iterations, total_target_iterations,
-                "Iteration count mismatch: expected {}, got {}",
-                total_target_iterations, total_iterations
-            );
-
-            if is_latency {
-                let lat_results = self.calculate_latency_results(
-                    msg_size,
-                    total_iterations,
-                    &histogram,
-                    min_latency_ns,
-                    max_latency_ns,
-                );
-                display.set_latency_results(lat_results.clone());
-
-                if !is_bidirectional && !is_server {
-                    // Convert BandwidthResult to TestResults
-                    let test_results = TestResults {
-                        test_type: crate::connection::exchange::TestType::Latency,
-                        size: msg_size,
-                        iterations: total_iterations,
-                        time: format!("{:.2}", time.as_secs_f64()),
-                        bandwidth_result: None,
-                        latency_result: Some(lat_results),
-                    };
-
-                    // Use the existing session to send results
-                    session.send_results(&test_results)?;
+                // Display individual results immediately if not in all-sizes mode
+                if shared_display.is_none() {
+                    display.display();
                 }
             } else {
-                let bw_results = self.calculate_bandwidth_results(
-                    msg_size,
-                    total_iterations,
-                    time.as_secs_f64(),
-                );
-                display.set_bandwidth_results(bw_results.clone());
+                // Server in unidirectional mode
+                println!("Server ready for client operations");
 
-                // If client in unidirectional mode, send results to server
-                if !is_bidirectional && !is_server {
-                    let test_results = TestResults {
-                        test_type: crate::connection::exchange::TestType::Bandwidth,
-                        size: msg_size,
-                        iterations: total_iterations,
-                        time: format!("{:.2}", time.as_secs_f64()),
-                        bandwidth_result: Some(bw_results),
-                        latency_result: None,
-                    };
+                // Wait for results from client
+                let test_results = session.receive_results()?;
 
-                    // Use the existing session to send results
-                    session.send_results(&test_results)?;
-                }
-            }
+                match test_results.test_type {
+                    crate::connection::exchange::TestType::Latency => {
+                        if let Some(lat_results) = test_results.latency_result {
+                            if let Some(shared) = &mut shared_display {
+                                shared.add_latency_result(lat_results);
+                            } else {
+                                display.set_latency_results(lat_results);
+                            }
+                        }
+                    }
 
-            display.display();
-        } else {
-            // Server in unidirectional mode
-            println!("Server ready for client operations");
-
-            // Wait for results from client
-            let test_results = session.receive_results()?;
-
-            match test_results.test_type {
-                crate::connection::exchange::TestType::Latency => {
-                    if let Some(lat_results) = test_results.latency_result {
-                        display.set_latency_results(lat_results);
+                    crate::connection::exchange::TestType::Bandwidth => {
+                        if let Some(bw_results) = test_results.bandwidth_result {
+                            if let Some(shared) = &mut shared_display {
+                                shared.add_bandwidth_result(bw_results);
+                            } else {
+                                display.set_bandwidth_results(bw_results);
+                            }
+                        }
                     }
                 }
 
-                crate::connection::exchange::TestType::Bandwidth => {
-                    if let Some(bw_results) = test_results.bandwidth_result {
-                        display.set_bandwidth_results(bw_results);
-                    }
+                // Display individual results immediately if not in all-sizes mode
+                if shared_display.is_none() {
+                    display.display();
                 }
             }
 
-            display.display();
+            // We don't close the session after each test anymore since we're reusing it
         }
 
+        // Close the session after all tests are complete
         session.close()?;
+
+        // Display consolidated results if in all-sizes mode
+        if let Some(shared) = shared_display {
+            println!("\n{}", "-".repeat(80));
+            println!("Consolidated results for all message sizes:");
+            println!("{}", "-".repeat(80));
+            shared.display();
+        }
 
         Ok(())
     }

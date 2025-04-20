@@ -71,11 +71,7 @@ impl ConnectionManager for TcpConnectionManager {
             .set_nonblocking(false)
             .map_err(ConnectionError::IoError)?;
 
-        self.local_addr = Some(
-            listener
-                .local_addr()
-                .map_err(ConnectionError::IoError)?,
-        );
+        self.local_addr = Some(listener.local_addr().map_err(ConnectionError::IoError)?);
 
         self.listener = Some(Arc::new(Mutex::new(listener)));
 
@@ -89,15 +85,9 @@ impl ConnectionManager for TcpConnectionManager {
         while retries < self.params.retry_count {
             match TcpStream::connect_timeout(&addr, self.params.timeout) {
                 Ok(stream) => {
-                    stream
-                        .set_nodelay(true)
-                        .map_err(ConnectionError::IoError)?;
+                    stream.set_nodelay(true).map_err(ConnectionError::IoError)?;
 
-                    self.local_addr = Some(
-                        stream
-                            .local_addr()
-                            .map_err(ConnectionError::IoError)?,
-                    );
+                    self.local_addr = Some(stream.local_addr().map_err(ConnectionError::IoError)?);
                     self.peer_addr = Some(addr);
                     self.stream = Some(Arc::new(Mutex::new(stream)));
 
@@ -128,9 +118,7 @@ impl ConnectionManager for TcpConnectionManager {
             .accept()
             .map_err(ConnectionError::IoError)?;
 
-        stream
-            .set_nodelay(true)
-            .map_err(ConnectionError::IoError)?;
+        stream.set_nodelay(true).map_err(ConnectionError::IoError)?;
 
         self.peer_addr = Some(peer_addr);
         self.stream = Some(Arc::new(Mutex::new(stream)));
@@ -326,9 +314,7 @@ impl ConnectionManager for TcpConnectionManager {
             .map_err(ConnectionError::IoError)?;
 
         // Send the payload
-        guard
-            .write_all(payload)
-            .map_err(ConnectionError::IoError)?;
+        guard.write_all(payload).map_err(ConnectionError::IoError)?;
 
         guard.flush().map_err(ConnectionError::IoError)?;
         Ok(())

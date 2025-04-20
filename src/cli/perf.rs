@@ -141,4 +141,10 @@ pub struct CommonArgs {
     /// Use bidirectional traffic pattern instead of default unidirectional
     #[arg(long, short = 'b', default_value_t = false)]
     pub bidirectional: bool,
+    /// Run test with all message sizes (2 bytes to 32 MiB)
+    #[arg(long, short = 'A')]
+    pub all_sizes: bool,
+    /// Multiplier between message sizes when using --all-sizes (default is 2x)
+    #[arg(long, default_value_t = 2.0)]
+    pub step_factor: f64,
 }
