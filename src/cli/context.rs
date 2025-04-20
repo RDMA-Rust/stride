@@ -108,4 +108,14 @@ pub trait CommandContext {
     fn bidirectional(&self) -> bool {
         false
     }
+
+    /// Get the number of WQEs to post in a single batch
+    fn post_list(&self) -> u32 {
+        1
+    }
+
+    /// Set the number of WQEs to post in a single batch
+    fn set_post_list(&mut self, _count: u32) {
+        // Default implementation does nothing
+    }
 }

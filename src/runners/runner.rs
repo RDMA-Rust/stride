@@ -410,6 +410,7 @@ impl<T: CommandContext> TestRunner<T> {
                 gid_type: format!("{:?}", conn_result.gid_type),
                 rx_depth: self.params.rx_depth().unwrap_or(512),
                 tx_depth,
+                post_list: self.params.post_list(),
                 test_type,
             };
 
@@ -441,6 +442,7 @@ impl<T: CommandContext> TestRunner<T> {
                         gid_type: format!("{:?}", conn_result.gid_type),
                         rx_depth: self.params.rx_depth().unwrap_or(512),
                         tx_depth,
+                        post_list: self.params.post_list(),
                         test_type,
                     },
                     qp_details.clone(),
@@ -458,6 +460,7 @@ impl<T: CommandContext> TestRunner<T> {
                         gid_type: format!("{:?}", conn_result.gid_type),
                         rx_depth: self.params.rx_depth().unwrap_or(512),
                         tx_depth,
+                        post_list: self.params.post_list(),
                         test_type,
                     },
                     Vec::new(),
@@ -499,46 +502,68 @@ impl<T: CommandContext> TestRunner<T> {
                         while inflight_per_qp[qp_idx] < tx_depth
                             && qp_iterations[qp_idx] < iterations_per_qp
                         {
+                            // Get the number of WQEs to post in a single batch
+                            let post_list = self
+                                .params
+                                .post_list()
+                                .min(
+                                    // Don't post more than what's left for this QP
+                                    iterations_per_qp - qp_iterations[qp_idx],
+                                )
+                                .min(
+                                    // Don't post more than the available tx_depth
+                                    tx_depth - inflight_per_qp[qp_idx],
+                                ) as usize;
+
+                            // Take timestamp for latency measurements
                             operation_start_time =
                                 if is_latency { Some(clock.now()) } else { None };
 
+                            // Create a single post guard
                             let mut guard = qps[qp_idx].start_post_send();
 
-                            // Calculate buffer offset - each QP has its own buffer region
-                            let buffer_region_size = tx_depth as usize * msg_size as usize;
-                            let qp_offset = qp_idx * buffer_region_size;
-                            let iter_offset =
-                                (qp_iterations[qp_idx] % tx_depth) as usize * msg_size as usize;
-                            let total_offset = qp_offset + iter_offset;
+                            // Post up to post_list operations at once
+                            for i in 0..post_list {
+                                // Calculate buffer offset - each QP has its own buffer region
+                                let buffer_region_size = tx_depth as usize * msg_size as usize;
+                                let qp_offset = qp_idx * buffer_region_size;
+                                let iter_offset = ((qp_iterations[qp_idx] + i as u32) % tx_depth)
+                                    as usize
+                                    * msg_size as usize;
+                                let total_offset = qp_offset + iter_offset;
 
-                            let local_addr = mr.get_ptr() as u64 + total_offset as u64;
+                                let local_addr = mr.get_ptr() as u64 + total_offset as u64;
 
-                            let wr_id = ((qp_idx as u64) << 32) | (qp_iterations[qp_idx] as u64);
+                                let wr_id = ((qp_idx as u64) << 32)
+                                    | ((qp_iterations[qp_idx] + i as u32) as u64);
 
-                            // For WRITE operations, use remote memory info
-                            let send_handle = if is_write {
-                                // Remote memory layout should match local layout
-                                let remote_offset = total_offset % conn_result.remote_mr.size;
-                                let remote_addr = remote_mr.addr + remote_offset as u64;
+                                // For WRITE operations, use remote memory info
+                                let send_handle = if is_write {
+                                    // Remote memory layout should match local layout
+                                    let remote_offset = total_offset % conn_result.remote_mr.size;
+                                    let remote_addr = remote_mr.addr + remote_offset as u64;
 
-                                guard
-                                    .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                                    .setup_write(remote_mr.rkey, remote_addr)
-                            } else {
-                                guard
-                                    .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                                    .setup_send()
-                            };
+                                    guard
+                                        .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                                        .setup_write(remote_mr.rkey, remote_addr)
+                                } else {
+                                    guard
+                                        .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                                        .setup_send()
+                                };
 
-                            // Setup scatter-gather entry
-                            unsafe {
-                                send_handle.setup_sge(mr.lkey(), local_addr, msg_size);
+                                // Setup scatter-gather entry
+                                unsafe {
+                                    send_handle.setup_sge(mr.lkey(), local_addr, msg_size);
+                                }
                             }
 
+                            // Post all operations at once
                             guard.post()?;
 
-                            qp_iterations[qp_idx] += 1;
-                            inflight_per_qp[qp_idx] += 1;
+                            // Update the iteration and inflight counters
+                            qp_iterations[qp_idx] += post_list as u32;
+                            inflight_per_qp[qp_idx] += post_list as u32;
                         }
                     }
 

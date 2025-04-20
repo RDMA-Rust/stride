@@ -147,4 +147,7 @@ pub struct CommonArgs {
     /// Multiplier between message sizes when using --all-sizes (default is 2x)
     #[arg(long, default_value_t = 2.0)]
     pub step_factor: f64,
+    /// Post list of send WQEs of <list size> size (instead of single post)
+    #[arg(long, short = 'l', default_value_t = 1)]
+    pub post_list: u32,
 }

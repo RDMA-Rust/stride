@@ -18,6 +18,7 @@ pub struct BaseParams {
     bidirectional: bool,
     all_sizes: bool,
     step_factor: f64,
+    post_list: u32,
 }
 
 impl Default for BaseParams {
@@ -37,6 +38,7 @@ impl Default for BaseParams {
             bidirectional: false,
             all_sizes: false,
             step_factor: 2.0,
+            post_list: 1,
         }
     }
 }
@@ -150,6 +152,14 @@ macro_rules! impl_command_context_for_base {
         fn bidirectional(&self) -> bool {
             self.base.bidirectional
         }
+
+        fn post_list(&self) -> u32 {
+            self.base.post_list
+        }
+
+        fn set_post_list(&mut self, count: u32) {
+            self.base.post_list = count;
+        }
     };
 }
 
@@ -187,6 +197,7 @@ impl SendBandwidthParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.post_list = args.common.post_list;
 
         base.tx_depth = Some(args.tx_depth);
         base.rx_depth = args.rx_depth;
@@ -287,6 +298,7 @@ impl WriteBandwidthParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.post_list = args.common.post_list;
 
         base.tx_depth = Some(args.tx_depth);
         base.rx_depth = None;
@@ -387,6 +399,7 @@ impl ReadBandwidthParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.post_list = args.common.post_list;
 
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;

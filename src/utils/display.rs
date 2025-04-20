@@ -63,6 +63,7 @@ pub struct TestConfiguration {
     pub gid_type: String,
     pub rx_depth: u32,
     pub tx_depth: u32,
+    pub post_list: u32,
     pub test_type: TestType,
 }
 
@@ -118,6 +119,7 @@ impl TestConfiguration {
             ConfigField::new("GID Type", &self.gid_type),
             ConfigField::new("Rx Depth", self.rx_depth),
             ConfigField::new("Tx Depth", self.tx_depth),
+            ConfigField::new("Post List", self.post_list),
         ]
     }
 }
