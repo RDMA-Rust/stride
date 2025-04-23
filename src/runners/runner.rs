@@ -140,7 +140,7 @@ impl<T: CommandContext> TestRunner<T> {
         ))
     }
 
-    // Helper methods to improve readability
+    #[inline]
     fn wait_for_completion(
         &self,
         cq: &GenericCompletionQueue,
@@ -200,12 +200,20 @@ impl<T: CommandContext> TestRunner<T> {
         }
     }
 
+    #[inline]
     fn poll_completions(
         &self,
         cq: &GenericCompletionQueue,
         inflight_per_qp: &mut [u32],
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Get the CQE poll batch size from parameters
+        let poll_batch_size = self.params.cqe_poll() as usize;
+
+        // Poll completions in batches (like perftest's CTX_POLL_BATCH)
         if let Ok(poller) = cq.start_poll() {
+            // Simply iterate but limit to poll_batch_size completions at once
+            let mut completed = 0;
+
             for wc in poller {
                 let qp_idx = (wc.wr_id() >> 32) as usize;
 
@@ -221,6 +229,12 @@ impl<T: CommandContext> TestRunner<T> {
                 }
 
                 inflight_per_qp[qp_idx] -= 1;
+                completed += 1;
+
+                // Stop polling after processing poll_batch_size completions
+                if completed >= poll_batch_size {
+                    break;
+                }
             }
         }
         Ok(())

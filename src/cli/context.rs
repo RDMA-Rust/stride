@@ -105,6 +105,16 @@ pub trait CommandContext {
         // Default implementation does nothing
     }
 
+    /// Get the CQE poll batch size
+    fn cqe_poll(&self) -> u32 {
+        32 // Default value
+    }
+
+    /// Set the CQE poll batch size
+    fn set_cqe_poll(&mut self, _size: u32) {
+        // Default implementation does nothing
+    }
+
     fn bidirectional(&self) -> bool {
         false
     }

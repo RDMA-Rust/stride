@@ -150,4 +150,7 @@ pub struct CommonArgs {
     /// Post list of send WQEs of <list size> size (instead of single post)
     #[arg(long, short = 'l', default_value_t = 1)]
     pub post_list: u32,
+    /// Completion queue entry poll batch size (default: 32)
+    #[arg(long, default_value_t = 32)]
+    pub cqe_poll: u32,
 }
