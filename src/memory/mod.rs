@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 pub mod system;
+pub mod aligned;
 
 pub trait MemoryOps {
     fn size(&self) -> usize;

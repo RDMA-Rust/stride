@@ -26,12 +26,43 @@ use crate::connection::session::ConnectionSession;
 use crate::connection::ConnectionParams;
 use crate::connection::EndpointRole;
 use crate::context::device::open_device_context;
-use crate::memory::system::SystemMemory;
+use crate::memory::aligned::{AlignedMemory, DEFAULT_CACHE_LINE_SIZE};
 use crate::memory::MemoryOps;
 use crate::utils::display::{
     BandwidthResult, DisplayOutput, LatencyResult, QueuePairDetail, TestConfiguration, TestType,
 };
 use crate::utils::random;
+
+/// Cache line size in bytes (for address alignment)
+const CACHE_LINE_SIZE: usize = 64;
+
+/// Helper to increment address with cache line alignment
+/// Similar to perftest's increase_loc_addr function
+#[inline]
+fn increase_addr_with_alignment(
+    current_addr: u64, 
+    msg_size: u32, 
+    iteration: u32, 
+    base_addr: u64, 
+    cycle_buffer_size: u32
+) -> u64 {
+    // Increment address, aligned to cache line
+    let incremented = current_addr + align_to_cache_line(msg_size as usize) as u64;
+    
+    // Check if we need to cycle back to the beginning of the buffer
+    if cycle_buffer_size > 0 && 
+       ((iteration + 1) % (cycle_buffer_size / align_to_cache_line(msg_size as usize) as u32)) == 0 {
+        base_addr
+    } else {
+        incremented
+    }
+}
+
+/// Align size to cache line boundary
+#[inline]
+fn align_to_cache_line(size: usize) -> usize {
+    ((size + CACHE_LINE_SIZE - 1) / CACHE_LINE_SIZE) * CACHE_LINE_SIZE
+}
 
 pub struct TestRunner<T: CommandContext> {
     params: T,
@@ -358,7 +389,9 @@ impl<T: CommandContext> TestRunner<T> {
         // Allocate the largest buffer we'll need based on the maximum message size
         let max_msg_size = *msg_sizes.iter().max().unwrap_or(&base_msg_size);
         let buffer_size = tx_depth as usize * max_msg_size as usize * qp_count;
-        let memory = SystemMemory::new(buffer_size, None)?;
+        // Create cache-line-aligned memory similar to perftest
+        let memory = AlignedMemory::new(buffer_size, Some(DEFAULT_CACHE_LINE_SIZE), false)?;
+
         let pd = Arc::new(ctx.alloc_pd()?);
         let mr = unsafe {
             pd.reg_mr(
@@ -536,26 +569,68 @@ impl<T: CommandContext> TestRunner<T> {
                             // Create a single post guard
                             let mut guard = qps[qp_idx].start_post_send();
 
+                            // Track addresses for cache-line aligned increments
+                            let mut prev_local_addr = 0;
+                            let mut prev_remote_addr = 0;
+                            
                             // Post up to post_list operations at once
                             for i in 0..post_list {
                                 // Calculate buffer offset - each QP has its own buffer region
                                 let buffer_region_size = tx_depth as usize * msg_size as usize;
                                 let qp_offset = qp_idx * buffer_region_size;
-                                let iter_offset = ((qp_iterations[qp_idx] + i as u32) % tx_depth)
-                                    as usize
-                                    * msg_size as usize;
-                                let total_offset = qp_offset + iter_offset;
+                                let base_addr = mr.get_ptr() as u64 + qp_offset as u64;
+                                
+                                // Set up cycle buffer size - will wrap around after this many bytes
+                                // This is equivalent to ctx->cycle_buffer in perftest
+                                let cycle_buffer_size = buffer_region_size as u32;
+                                
+                                // Get current iteration for this QP
+                                let current_iter = qp_iterations[qp_idx] + i as u32;
+                                
+                                // Calculate local address with cache-line aligned incrementing
+                                let local_addr = if i == 0 {
+                                    // First operation in batch uses calculated offset
+                                    let iter_offset = (current_iter % tx_depth) as usize * msg_size as usize;
+                                    base_addr + iter_offset as u64
+                                } else {
+                                    // Subsequent operations increment with cache-line alignment
+                                    increase_addr_with_alignment(
+                                        prev_local_addr,
+                                        msg_size,
+                                        current_iter - 1,
+                                        base_addr,
+                                        cycle_buffer_size
+                                    )
+                                };
+                                
+                                // Save current address for next iteration
+                                prev_local_addr = local_addr;
 
-                                let local_addr = mr.get_ptr() as u64 + total_offset as u64;
-
-                                let wr_id = ((qp_idx as u64) << 32)
-                                    | ((qp_iterations[qp_idx] + i as u32) as u64);
+                                let wr_id = ((qp_idx as u64) << 32) | (current_iter as u64);
 
                                 // For WRITE operations, use remote memory info
                                 let send_handle = if is_write {
-                                    // Remote memory layout should match local layout
-                                    let remote_offset = total_offset % conn_result.remote_mr.size;
-                                    let remote_addr = remote_mr.addr + remote_offset as u64;
+                                    // Calculate remote base address for this QP
+                                    let remote_base_addr = remote_mr.addr + qp_offset as u64;
+                                    
+                                    // Calculate remote address with cache-line aligned incrementing
+                                    let remote_addr = if i == 0 {
+                                        // First operation in batch uses calculated offset
+                                        let remote_iter_offset = (current_iter % tx_depth) as usize * msg_size as usize;
+                                        remote_base_addr + remote_iter_offset as u64
+                                    } else {
+                                        // Subsequent operations increment with cache-line alignment
+                                        increase_addr_with_alignment(
+                                            prev_remote_addr,
+                                            msg_size,
+                                            current_iter - 1,
+                                            remote_base_addr,
+                                            cycle_buffer_size
+                                        )
+                                    };
+                                    
+                                    // Save current remote address for next iteration
+                                    prev_remote_addr = remote_addr;
 
                                     guard
                                         .construct_wr(wr_id, WorkRequestFlags::Signaled)
