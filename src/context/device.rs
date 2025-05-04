@@ -2,6 +2,7 @@ use sideway::ibverbs::{
     device::{DeviceInfo, DeviceList},
     device_context::DeviceContext,
 };
+use tracing::info;
 
 pub fn open_device_context(device_name: Option<&str>) -> Result<DeviceContext, String> {
     let list = DeviceList::new().map_err(|e| format!("Failed to get device list: {e}"))?;
@@ -17,8 +18,8 @@ pub fn open_device_context(device_name: Option<&str>) -> Result<DeviceContext, S
             .ok_or_else(|| format!("Device {name} not found"))?,
         None => {
             let device = list.get(0).unwrap();
-            println!(
-                "No device specified, using first avaiable device: {}",
+            info!(
+                "No device specified, using first available device: {}",
                 device.name()
             );
             device

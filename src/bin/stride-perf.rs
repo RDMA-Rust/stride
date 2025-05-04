@@ -4,6 +4,7 @@ use stride::runners::runner::TestRunner;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = PerfCli::parse();
+    tracing_subscriber::fmt::init();
 
     match cli.command {
         PerfCommands::Send(cmd) => match cmd {

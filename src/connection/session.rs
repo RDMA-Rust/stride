@@ -13,6 +13,8 @@ use crate::connection::{
 };
 use crate::utils::random;
 
+use tracing::{debug, info};
+
 pub struct ConnectionSession<'a> {
     manager: Box<dyn ConnectionManager>,
     ctx: Arc<DeviceContext>,
@@ -55,15 +57,15 @@ impl<'a> ConnectionSession<'a> {
             EndpointRole::Server => {
                 // Server mode - bind and accept
                 self.manager.listen(addr)?;
-                println!("Listening on {}", addr);
+                info!("Listening on {}", addr);
                 self.manager.accept()?;
-                println!("Connection accepted from {}", self.manager.peer_addr()?);
+                info!("Connection accepted from {}", self.manager.peer_addr()?);
             }
             EndpointRole::Client => {
                 // Client mode - connect
-                println!("Connecting to {}", addr);
+                info!("Connecting to {}", addr);
                 self.manager.connect(addr)?;
-                println!("Connected to {}", self.manager.peer_addr()?);
+                info!("Connected to {}", self.manager.peer_addr()?);
             }
         }
 
@@ -86,14 +88,18 @@ impl<'a> ConnectionSession<'a> {
         // Exchange with remote peer
         let remote_mr = self.manager.exchange_memory_regions(local_mr)?;
 
-        println!("Memory regions exchanged:");
-        println!(
-            "  Local: addr=0x{:x}, rkey=0x{:x}, size={}",
-            local_mr.addr, local_mr.rkey, local_mr.size
+        info!(
+            local_addr = format!("0x{:x}", local_mr.addr),
+            local_rkey = format!("0x{:x}", local_mr.rkey),
+            local_size = format!("0x{:x}", local_mr.size),
+            "Local MR information sent.",
         );
-        println!(
-            "  Remote: addr=0x{:x}, rkey=0x{:x}, size={}",
-            remote_mr.addr, remote_mr.rkey, remote_mr.size
+
+        info!(
+            remote_addr = format!("0x{:x}", remote_mr.addr),
+            remote_rkey = format!("0x{:x}", remote_mr.rkey),
+            remote_size = format!("0x{:x}", remote_mr.size),
+            "Remote MR information received.",
         );
 
         Ok(remote_mr)
@@ -143,13 +149,13 @@ impl<'a> ConnectionSession<'a> {
 
     /// Receive test results (server mode)
     pub fn receive_results(&self) -> ConnectionResult<TestResults> {
-        println!("Waiting to receive test results from client");
+        debug!("Waiting to receive test results from client");
         self.manager.receive_results()
     }
 
     /// Send test results (client mode)
     pub fn send_results(&self, results: &TestResults) -> ConnectionResult<()> {
-        println!("Sending test results to server");
+        debug!("Sending test results to server");
         self.manager.send_results(results)
     }
 

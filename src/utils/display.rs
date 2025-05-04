@@ -549,11 +549,11 @@ impl DisplayOutput {
             println!("{}", table);
         }
 
-        if self.bw_results_collection.len() > 0 {
+        if !self.bw_results_collection.is_empty() {
             self.display_bandwidth_collection(header_width);
         }
 
-        if self.lat_results_collection.len() > 0 {
+        if !self.lat_results_collection.is_empty() {
             self.display_latency_collection(header_width);
         }
     }

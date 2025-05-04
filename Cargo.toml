@@ -19,6 +19,8 @@ byte-unit = "5.1"
 rand = "0.8"
 bincode = "1"
 hdrhistogram = "7"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [lib]
 name = "stride"

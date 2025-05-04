@@ -1,4 +1,5 @@
 use crate::connection::exchange::ConnectionSetupResult;
+use crate::memory::aligned::HUGE_PAGE_SIZE;
 use anyhow::Result;
 use byte_unit::Byte;
 use quanta::Clock;
@@ -16,6 +17,7 @@ use sideway::ibverbs::queue_pair::{
     GenericQueuePair, PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
 };
 use sideway::ibverbs::AccessFlags;
+use tracing::debug;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +35,8 @@ use crate::utils::display::{
 };
 use crate::utils::random;
 
+use tracing::info;
+
 /// Cache line size in bytes (for address alignment)
 const CACHE_LINE_SIZE: usize = 64;
 
@@ -40,18 +44,20 @@ const CACHE_LINE_SIZE: usize = 64;
 /// Similar to perftest's increase_loc_addr function
 #[inline]
 fn increase_addr_with_alignment(
-    current_addr: u64, 
-    msg_size: u32, 
-    iteration: u32, 
-    base_addr: u64, 
-    cycle_buffer_size: u32
+    current_addr: u64,
+    msg_size: u32,
+    iteration: u32,
+    base_addr: u64,
+    cycle_buffer_size: u32,
 ) -> u64 {
     // Increment address, aligned to cache line
     let incremented = current_addr + align_to_cache_line(msg_size as usize) as u64;
-    
+
     // Check if we need to cycle back to the beginning of the buffer
-    if cycle_buffer_size > 0 && 
-       ((iteration + 1) % (cycle_buffer_size / align_to_cache_line(msg_size as usize) as u32)) == 0 {
+    if cycle_buffer_size > 0
+        && ((iteration + 1) % (cycle_buffer_size / align_to_cache_line(msg_size as usize) as u32))
+            == 0
+    {
         base_addr
     } else {
         incremented
@@ -61,7 +67,7 @@ fn increase_addr_with_alignment(
 /// Align size to cache line boundary
 #[inline]
 fn align_to_cache_line(size: usize) -> usize {
-    ((size + CACHE_LINE_SIZE - 1) / CACHE_LINE_SIZE) * CACHE_LINE_SIZE
+    size.div_ceil(HUGE_PAGE_SIZE) * CACHE_LINE_SIZE
 }
 
 pub struct TestRunner<T: CommandContext> {
@@ -87,10 +93,10 @@ impl<T: CommandContext> TestRunner<T> {
         // Create connection parameters
         let mut conn_params = ConnectionParams::default();
         conn_params.role = if server_mode {
-            println!("Running in server mode");
+            info!("Running in server mode");
             EndpointRole::Server
         } else {
-            println!("Running in client mode");
+            info!("Running in client mode");
             EndpointRole::Client
         };
 
@@ -109,14 +115,13 @@ impl<T: CommandContext> TestRunner<T> {
             format!("0.0.0.0:{}", self.params.port().unwrap_or(18515))
         } else {
             let target = self.params.address().unwrap_or_else(|| {
-                println!("No target address specified, using localhost");
+                info!("No target address specified, using localhost");
                 "127.0.0.1".to_string()
             });
 
             format!("{}:{}", target, self.params.port().unwrap_or(18515))
         };
 
-        println!("Establishing connection via {}", address);
         session.establish_connection(&address)?;
         let actual_mtu = 4096;
 
@@ -126,9 +131,8 @@ impl<T: CommandContext> TestRunner<T> {
         let mut remote_gid = Gid::default();
 
         // Setup each queue pair
-        println!("Setting up {} queue pairs", qps.len());
+        debug!("Setting up {} queue pairs", qps.len());
         for (i, (qp, detail)) in qps.iter_mut().zip(qp_details.iter_mut()).enumerate() {
-            println!("Setting up QP #{}", i);
             // Store local PSN before exchange
             let local_psn = detail.local_psn;
 
@@ -142,14 +146,16 @@ impl<T: CommandContext> TestRunner<T> {
             detail.remote_qpn = remote_data.qp_number;
             detail.remote_psn = remote_data.psn;
 
-            println!(
-                "QP #{} setup complete: Local QPN: 0x{:x}, Remote QPN: 0x{:x}, Remote PSN: 0x{:x}",
-                i, detail.local_qpn, detail.remote_qpn, detail.remote_psn
+            info!(
+                local_qpn = detail.local_qpn,
+                remote_qpn = detail.remote_qpn,
+                remote_psn = format!("0x{:x}", detail.remote_psn),
+                "QP #{i} setup complete.",
             );
         }
 
         // Exchange memory regions after QP setup
-        println!("Exchanging memory region information...");
+        debug!("Exchanging memory region information...");
         let remote_mr =
             session.exchange_memory_regions(mr.get_ptr() as u64, mr.rkey(), mr.region_len())?;
 
@@ -327,7 +333,7 @@ impl<T: CommandContext> TestRunner<T> {
     }
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Starting {}", self.params.operation_name());
+        info!("Starting {}", self.params.operation_name());
 
         // Default device fallback
         let device_name = self.params.device();
@@ -361,7 +367,7 @@ impl<T: CommandContext> TestRunner<T> {
             vec![base_msg_size]
         };
 
-        println!("Will test {} message sizes", msg_sizes.len());
+        info!("Will test {} message sizes", msg_sizes.len());
 
         let ctx = Arc::new(open_device_context(device_name)?);
         // Determine test type
@@ -471,7 +477,7 @@ impl<T: CommandContext> TestRunner<T> {
         };
 
         for msg_size in msg_sizes {
-            println!("\nTesting message size: {} bytes", msg_size);
+            info!(message_size = msg_size, "Running test.");
 
             // Reset the histogram for each size
             histogram.reset();
@@ -572,25 +578,26 @@ impl<T: CommandContext> TestRunner<T> {
                             // Track addresses for cache-line aligned increments
                             let mut prev_local_addr = 0;
                             let mut prev_remote_addr = 0;
-                            
+
                             // Post up to post_list operations at once
                             for i in 0..post_list {
                                 // Calculate buffer offset - each QP has its own buffer region
                                 let buffer_region_size = tx_depth as usize * msg_size as usize;
                                 let qp_offset = qp_idx * buffer_region_size;
                                 let base_addr = mr.get_ptr() as u64 + qp_offset as u64;
-                                
+
                                 // Set up cycle buffer size - will wrap around after this many bytes
                                 // This is equivalent to ctx->cycle_buffer in perftest
                                 let cycle_buffer_size = buffer_region_size as u32;
-                                
+
                                 // Get current iteration for this QP
                                 let current_iter = qp_iterations[qp_idx] + i as u32;
-                                
+
                                 // Calculate local address with cache-line aligned incrementing
                                 let local_addr = if i == 0 {
                                     // First operation in batch uses calculated offset
-                                    let iter_offset = (current_iter % tx_depth) as usize * msg_size as usize;
+                                    let iter_offset =
+                                        (current_iter % tx_depth) as usize * msg_size as usize;
                                     base_addr + iter_offset as u64
                                 } else {
                                     // Subsequent operations increment with cache-line alignment
@@ -599,10 +606,10 @@ impl<T: CommandContext> TestRunner<T> {
                                         msg_size,
                                         current_iter - 1,
                                         base_addr,
-                                        cycle_buffer_size
+                                        cycle_buffer_size,
                                     )
                                 };
-                                
+
                                 // Save current address for next iteration
                                 prev_local_addr = local_addr;
 
@@ -612,11 +619,12 @@ impl<T: CommandContext> TestRunner<T> {
                                 let send_handle = if is_write {
                                     // Calculate remote base address for this QP
                                     let remote_base_addr = remote_mr.addr + qp_offset as u64;
-                                    
+
                                     // Calculate remote address with cache-line aligned incrementing
                                     let remote_addr = if i == 0 {
                                         // First operation in batch uses calculated offset
-                                        let remote_iter_offset = (current_iter % tx_depth) as usize * msg_size as usize;
+                                        let remote_iter_offset =
+                                            (current_iter % tx_depth) as usize * msg_size as usize;
                                         remote_base_addr + remote_iter_offset as u64
                                     } else {
                                         // Subsequent operations increment with cache-line alignment
@@ -625,10 +633,10 @@ impl<T: CommandContext> TestRunner<T> {
                                             msg_size,
                                             current_iter - 1,
                                             remote_base_addr,
-                                            cycle_buffer_size
+                                            cycle_buffer_size,
                                         )
                                     };
-                                    
+
                                     // Save current remote address for next iteration
                                     prev_remote_addr = remote_addr;
 
@@ -759,7 +767,7 @@ impl<T: CommandContext> TestRunner<T> {
                 }
             } else {
                 // Server in unidirectional mode
-                println!("Server ready for client operations");
+                debug!("Server ready for client operations");
 
                 // Wait for results from client
                 let test_results = session.receive_results()?;

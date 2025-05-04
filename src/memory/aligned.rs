@@ -12,7 +12,7 @@ pub const DEFAULT_CACHE_LINE_SIZE: usize = 64;
 pub const HUGE_PAGE_SIZE: usize = 2 * 1024 * 1024;
 
 /// AlignedMemory provides memory allocation aligned to cache line boundaries
-/// 
+///
 /// This implementation mimics perftest's host_memory.c to provide better performance
 /// through proper memory alignment and optional huge pages support.
 pub struct AlignedMemory {
@@ -37,23 +37,23 @@ impl AlignedMemory {
     /// * `use_huge_pages` - Whether to try using huge pages (not implemented yet)
     pub fn new(size: usize, alignment: Option<usize>, use_huge_pages: bool) -> Result<Self> {
         let alignment = alignment.unwrap_or(DEFAULT_CACHE_LINE_SIZE);
-        
+
         // Ensure alignment is a power of two
         if !alignment.is_power_of_two() {
             return Err(anyhow!("Alignment must be a power of two"));
         }
-        
+
         // If using huge pages, round the size up to huge page boundary
         let size = if use_huge_pages {
-            ((size + HUGE_PAGE_SIZE - 1) / HUGE_PAGE_SIZE) * HUGE_PAGE_SIZE
+            size.div_ceil(HUGE_PAGE_SIZE) * HUGE_PAGE_SIZE
         } else {
             size
         };
-        
+
         // Create a layout with the requested alignment
         let layout = Layout::from_size_align(size, alignment)
             .map_err(|e| anyhow!("Failed to create memory layout: {}", e))?;
-        
+
         // Allocate the memory
         let ptr = unsafe {
             let ptr = alloc(layout);
@@ -62,12 +62,12 @@ impl AlignedMemory {
             }
             NonNull::new_unchecked(ptr)
         };
-        
+
         // Initialize the memory to zero
         unsafe {
             ptr.as_ptr().write_bytes(0, size);
         }
-        
+
         Ok(Self {
             ptr,
             size,
@@ -76,12 +76,12 @@ impl AlignedMemory {
             _use_huge_pages: use_huge_pages,
         })
     }
-    
+
     /// Get a reference to the allocated memory as a slice
     pub fn as_slice(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.size) }
     }
-    
+
     /// Get a mutable reference to the allocated memory as a slice
     pub fn as_slice_mut(&mut self) -> &mut [u8] {
         unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
@@ -97,7 +97,7 @@ impl MemoryOps for AlignedMemory {
         if offset + data.len() > self.size {
             return Err(anyhow!("Write operation would exceed buffer size"));
         }
-        
+
         let slice = self.as_slice_mut();
         slice[offset..offset + data.len()].copy_from_slice(data);
         Ok(())
@@ -107,7 +107,7 @@ impl MemoryOps for AlignedMemory {
         if offset + data.len() > self.size {
             return Err(anyhow!("Read operation would exceed buffer size"));
         }
-        
+
         let slice = self.as_slice();
         data.copy_from_slice(&slice[offset..offset + data.len()]);
         Ok(())
