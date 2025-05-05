@@ -91,13 +91,15 @@ impl<T: CommandContext> TestRunner<T> {
         let server_mode = self.params.server_mode();
 
         // Create connection parameters
-        let mut conn_params = ConnectionParams::default();
-        conn_params.role = if server_mode {
-            info!("Running in server mode");
-            EndpointRole::Server
-        } else {
-            info!("Running in client mode");
-            EndpointRole::Client
+        let mut conn_params = ConnectionParams {
+            role: if server_mode {
+                info!("Running in server mode");
+                EndpointRole::Server
+            } else {
+                info!("Running in client mode");
+                EndpointRole::Client
+            },
+            ..Default::default()
         };
 
         // Adjust timeout based on QP timeout parameter

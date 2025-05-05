@@ -1,5 +1,8 @@
 use super::context::CommandContext;
-use crate::cli::perf::SendBandwidthArgs;
+use crate::cli::perf::{
+    CommonArgs, ReadBandwidthArgs, ReadLatencyArgs, SendBandwidthArgs, SendLatencyArgs,
+    WriteBandwidthArgs, WriteLatencyArgs,
+};
 
 /// Base parameters shared by all commands
 #[derive(Debug, Clone)]
@@ -49,6 +52,26 @@ impl Default for BaseParams {
             use_hugepages: false,
         }
     }
+}
+
+// Helper function to set common parameters from CommonArgs
+fn set_common_params(base: &mut BaseParams, common: &CommonArgs) {
+    base.device = common.device.clone();
+    base.gid_index = common.gid_index;
+    base.iterations = common.iters;
+    base.message_size = common.msg_size;
+    base.qp_timeout = common.qp_timeout;
+    base.address = common.server_address.clone();
+    base.port = common.port;
+    base.qp_count = common.qp_count as usize;
+    base.bidirectional = common.bidirectional;
+    base.all_sizes = common.all_sizes;
+    base.step_factor = common.step_factor;
+    base.step_addition = common.step_addition;
+    base.max_msg_size = common.max_msg_size;
+    base.use_hugepages = common.use_hugepages;
+    base.post_list = common.post_list;
+    base.cqe_poll = common.cqe_poll;
 }
 
 macro_rules! impl_command_context_for_base {
@@ -217,32 +240,19 @@ impl Default for SendBandwidthParams {
 
 impl SendBandwidthParams {
     pub fn new() -> Self {
-        let mut base = BaseParams::default();
-        base.tx_depth = Some(128);
-        Self { base }
+        Self {
+            base: BaseParams {
+                tx_depth: Some(128),
+                ..Default::default()
+            },
+        }
     }
 
     pub fn from_args(args: &SendBandwidthArgs) -> Self {
         let mut base = BaseParams::default();
+        set_common_params(&mut base, &args.common);
 
-        base.device = args.common.device.clone();
-        base.gid_index = args.common.gid_index;
-        base.iterations = args.common.iters;
-        base.message_size = args.common.msg_size;
-        base.qp_timeout = args.common.qp_timeout;
-        // Use server_address for client/server determination
-        base.address = args.common.server_address.clone();
-        base.port = args.common.port;
-        base.qp_count = args.common.qp_count as usize;
-        base.bidirectional = args.common.bidirectional;
-        base.all_sizes = args.common.all_sizes;
-        base.step_factor = args.common.step_factor;
-        base.step_addition = args.common.step_addition;
-        base.max_msg_size = args.common.max_msg_size;
-        base.use_hugepages = args.common.use_hugepages;
-        base.post_list = args.common.post_list;
-        base.cqe_poll = args.common.cqe_poll;
-
+        // Set Send-bandwidth specific parameters
         base.tx_depth = Some(args.tx_depth);
         base.rx_depth = args.rx_depth;
         base.use_imm_data = args.imm_data;
@@ -277,25 +287,11 @@ impl SendLatencyParams {
         }
     }
 
-    pub fn from_args(args: &crate::cli::perf::SendLatencyArgs) -> Self {
+    pub fn from_args(args: &SendLatencyArgs) -> Self {
         let mut base = BaseParams::default();
+        set_common_params(&mut base, &args.common);
 
-        base.device = args.common.device.clone();
-        base.gid_index = args.common.gid_index;
-        base.iterations = args.common.iters;
-        base.message_size = args.common.msg_size;
-        base.qp_timeout = args.common.qp_timeout;
-        // Use server_address for client/server determination
-        base.address = args.common.server_address.clone();
-        base.port = args.common.port;
-        base.qp_count = args.common.qp_count as usize;
-        base.bidirectional = args.common.bidirectional;
-        base.all_sizes = args.common.all_sizes;
-        base.step_factor = args.common.step_factor;
-        base.step_addition = args.common.step_addition;
-        base.max_msg_size = args.common.max_msg_size;
-        base.use_hugepages = args.common.use_hugepages;
-
+        // Set Send-latency specific parameters
         base.tx_depth = args.tx_depth;
         base.rx_depth = args.rx_depth;
         base.use_imm_data = args.imm_data;
@@ -325,32 +321,19 @@ impl Default for WriteBandwidthParams {
 
 impl WriteBandwidthParams {
     pub fn new() -> Self {
-        let mut base = BaseParams::default();
-        base.tx_depth = Some(128);
-        Self { base }
+        Self {
+            base: BaseParams {
+                tx_depth: Some(128),
+                ..Default::default()
+            },
+        }
     }
 
-    pub fn from_args(args: &crate::cli::perf::WriteBandwidthArgs) -> Self {
+    pub fn from_args(args: &WriteBandwidthArgs) -> Self {
         let mut base = BaseParams::default();
+        set_common_params(&mut base, &args.common);
 
-        base.device = args.common.device.clone();
-        base.gid_index = args.common.gid_index;
-        base.iterations = args.common.iters;
-        base.message_size = args.common.msg_size;
-        base.qp_timeout = args.common.qp_timeout;
-        // Use server_address for client/server determination
-        base.address = args.common.server_address.clone();
-        base.port = args.common.port;
-        base.qp_count = args.common.qp_count as usize;
-        base.bidirectional = args.common.bidirectional;
-        base.all_sizes = args.common.all_sizes;
-        base.step_factor = args.common.step_factor;
-        base.step_addition = args.common.step_addition;
-        base.max_msg_size = args.common.max_msg_size;
-        base.use_hugepages = args.common.use_hugepages;
-        base.post_list = args.common.post_list;
-        base.cqe_poll = args.common.cqe_poll;
-
+        // Set Write-bandwidth specific parameters
         base.tx_depth = Some(args.tx_depth);
         base.rx_depth = None;
         base.use_imm_data = args.imm_data;
@@ -385,25 +368,11 @@ impl WriteLatencyParams {
         }
     }
 
-    pub fn from_args(args: &crate::cli::perf::WriteLatencyArgs) -> Self {
+    pub fn from_args(args: &WriteLatencyArgs) -> Self {
         let mut base = BaseParams::default();
+        set_common_params(&mut base, &args.common);
 
-        base.device = args.common.device.clone();
-        base.gid_index = args.common.gid_index;
-        base.iterations = args.common.iters;
-        base.message_size = args.common.msg_size;
-        base.qp_timeout = args.common.qp_timeout;
-        // Use server_address for client/server determination
-        base.address = args.common.server_address.clone();
-        base.port = args.common.port;
-        base.qp_count = args.common.qp_count as usize;
-        base.bidirectional = args.common.bidirectional;
-        base.all_sizes = args.common.all_sizes;
-        base.step_factor = args.common.step_factor;
-        base.step_addition = args.common.step_addition;
-        base.max_msg_size = args.common.max_msg_size;
-        base.use_hugepages = args.common.use_hugepages;
-
+        // Set Write-latency specific parameters
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;
         base.use_imm_data = args.imm_data;
@@ -438,30 +407,14 @@ impl ReadBandwidthParams {
         }
     }
 
-    pub fn from_args(args: &crate::cli::perf::ReadBandwidthArgs) -> Self {
+    pub fn from_args(args: &ReadBandwidthArgs) -> Self {
         let mut base = BaseParams::default();
+        set_common_params(&mut base, &args.common);
 
-        base.device = args.common.device.clone();
-        base.gid_index = args.common.gid_index;
-        base.iterations = args.common.iters;
-        base.message_size = args.common.msg_size;
-        base.qp_timeout = args.common.qp_timeout;
-        // Use server_address for client/server determination
-        base.address = args.common.server_address.clone();
-        base.port = args.common.port;
-        base.qp_count = args.common.qp_count as usize;
-        base.bidirectional = args.common.bidirectional;
-        base.all_sizes = args.common.all_sizes;
-        base.step_factor = args.common.step_factor;
-        base.step_addition = args.common.step_addition;
-        base.max_msg_size = args.common.max_msg_size;
-        base.use_hugepages = args.common.use_hugepages;
-        base.post_list = args.common.post_list;
-        base.cqe_poll = args.common.cqe_poll;
-
+        // Set Read-bandwidth specific parameters
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;
-        base.use_imm_data = false;
+        base.use_imm_data = false; // READ operations don't use immediate data
 
         Self { base }
     }
@@ -493,28 +446,14 @@ impl ReadLatencyParams {
         }
     }
 
-    pub fn from_args(args: &crate::cli::perf::ReadLatencyArgs) -> Self {
+    pub fn from_args(args: &ReadLatencyArgs) -> Self {
         let mut base = BaseParams::default();
+        set_common_params(&mut base, &args.common);
 
-        base.device = args.common.device.clone();
-        base.gid_index = args.common.gid_index;
-        base.iterations = args.common.iters;
-        base.message_size = args.common.msg_size;
-        base.qp_timeout = args.common.qp_timeout;
-        // Use server_address for client/server determination
-        base.address = args.common.server_address.clone();
-        base.port = args.common.port;
-        base.qp_count = args.common.qp_count as usize;
-        base.bidirectional = args.common.bidirectional;
-        base.all_sizes = args.common.all_sizes;
-        base.step_factor = args.common.step_factor;
-        base.step_addition = args.common.step_addition;
-        base.max_msg_size = args.common.max_msg_size;
-        base.use_hugepages = args.common.use_hugepages;
-
+        // Set Read-latency specific parameters
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;
-        base.use_imm_data = false;
+        base.use_imm_data = false; // READ operations don't use immediate data
 
         Self { base }
     }
