@@ -155,7 +155,51 @@ impl<'a> ConnectionSession<'a> {
 
     /// Send test results (client mode)
     pub fn send_results(&self, results: &TestResults) -> ConnectionResult<()> {
-        debug!("Sending test results to server");
+        if results.bandwidth_result.is_some() {
+            info!(
+                test_type = format!("{:?}", results.test_type),
+                message_size = results.size,
+                iterations = results.iterations,
+                bandwidth = format!(
+                    "{:.5} Gbps",
+                    results.bandwidth_result.as_ref().unwrap().bandwidth
+                ),
+                mpps = format!(
+                    "{:.5} Mpps",
+                    results.bandwidth_result.as_ref().unwrap().msg_rate
+                ),
+                "Sending bandwidth test results to server."
+            );
+        }
+        if results.latency_result.is_some() {
+            info!(
+                test_type = format!("{:?}", results.test_type),
+                message_size = results.size,
+                iterations = results.iterations,
+                avg_latency = format!(
+                    "{:.5} us",
+                    results.latency_result.as_ref().unwrap().avg_latency
+                ),
+                min_latency = format!(
+                    "{:.5} us",
+                    results.latency_result.as_ref().unwrap().min_latency
+                ),
+                max_latency = format!(
+                    "{:.5} us",
+                    results.latency_result.as_ref().unwrap().max_latency
+                ),
+                p99_latency = format!(
+                    "{:.5} us",
+                    results.latency_result.as_ref().unwrap().p99_latency
+                ),
+                p999_latency = format!(
+                    "{:.5} us",
+                    results.latency_result.as_ref().unwrap().p999_latency
+                ),
+                "Sending latency test results to server."
+            );
+        }
+
         self.manager.send_results(results)
     }
 

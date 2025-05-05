@@ -775,6 +775,18 @@ impl<T: CommandContext> TestRunner<T> {
                 match test_results.test_type {
                     crate::connection::exchange::TestType::Latency => {
                         if let Some(lat_results) = test_results.latency_result {
+                            info!(
+                                test_type = format!("{:?}", test_results.test_type),
+                                message_size = test_results.size,
+                                iterations = test_results.iterations,
+                                avg_latency = format!("{:.5} us", lat_results.avg_latency),
+                                min_latency = format!("{:.5} us", lat_results.min_latency),
+                                max_latency = format!("{:.5} us", lat_results.max_latency),
+                                p99_latency = format!("{:.5} us", lat_results.p99_latency),
+                                p999_latency = format!("{:.5} us", lat_results.p999_latency),
+                                "Received latency test results from server."
+                            );
+
                             if let Some(shared) = &mut shared_display {
                                 shared.add_latency_result(lat_results);
                             } else {
@@ -785,6 +797,15 @@ impl<T: CommandContext> TestRunner<T> {
 
                     crate::connection::exchange::TestType::Bandwidth => {
                         if let Some(bw_results) = test_results.bandwidth_result {
+                            info!(
+                                test_type = format!("{:?}", test_results.test_type),
+                                message_size = test_results.size,
+                                iterations = test_results.iterations,
+                                bandwidth = format!("{:.5} Gbps", bw_results.bandwidth),
+                                mpps = format!("{:.5} Mpps", bw_results.msg_rate),
+                                "Received bandwidth test results from server."
+                            );
+
                             if let Some(shared) = &mut shared_display {
                                 shared.add_bandwidth_result(bw_results);
                             } else {
