@@ -21,7 +21,7 @@ pub struct AlignedMemory {
     /// Size of the allocated memory
     size: usize,
     /// Alignment used for this allocation
-    alignment: usize,
+    _alignment: usize,
     /// Original layout used for deallocation
     layout: Layout,
     /// Whether huge pages are being used
@@ -71,7 +71,7 @@ impl AlignedMemory {
         Ok(Self {
             ptr,
             size,
-            alignment,
+            _alignment: alignment,
             layout,
             _use_huge_pages: use_huge_pages,
         })

@@ -18,8 +18,11 @@ pub struct BaseParams {
     bidirectional: bool,
     all_sizes: bool,
     step_factor: f64,
+    step_addition: u32,
+    max_msg_size: u32,
     post_list: u32,
     cqe_poll: u32,
+    use_hugepages: bool,
 }
 
 impl Default for BaseParams {
@@ -39,8 +42,11 @@ impl Default for BaseParams {
             bidirectional: false,
             all_sizes: false,
             step_factor: 2.0,
+            step_addition: 0,
+            max_msg_size: 33_554_432, // 32 MiB
             post_list: 1,
             cqe_poll: 32,
+            use_hugepages: false,
         }
     }
 }
@@ -127,6 +133,30 @@ macro_rules! impl_command_context_for_base {
             self.base.step_factor = factor;
         }
 
+        fn step_addition(&self) -> u32 {
+            self.base.step_addition
+        }
+
+        fn set_step_addition(&mut self, addition: u32) {
+            self.base.step_addition = addition;
+        }
+
+        fn max_msg_size(&self) -> u32 {
+            self.base.max_msg_size
+        }
+
+        fn set_max_msg_size(&mut self, max_size: u32) {
+            self.base.max_msg_size = max_size;
+        }
+
+        fn use_hugepages(&self) -> bool {
+            self.base.use_hugepages
+        }
+
+        fn set_use_hugepages(&mut self, use_hugepages: bool) {
+            self.base.use_hugepages = use_hugepages;
+        }
+
         fn port(&self) -> Option<u16> {
             Some(self.base.port)
         }
@@ -207,6 +237,9 @@ impl SendBandwidthParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.step_addition = args.common.step_addition;
+        base.max_msg_size = args.common.max_msg_size;
+        base.use_hugepages = args.common.use_hugepages;
         base.post_list = args.common.post_list;
         base.cqe_poll = args.common.cqe_poll;
 
@@ -259,6 +292,9 @@ impl SendLatencyParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.step_addition = args.common.step_addition;
+        base.max_msg_size = args.common.max_msg_size;
+        base.use_hugepages = args.common.use_hugepages;
 
         base.tx_depth = args.tx_depth;
         base.rx_depth = args.rx_depth;
@@ -309,6 +345,9 @@ impl WriteBandwidthParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.step_addition = args.common.step_addition;
+        base.max_msg_size = args.common.max_msg_size;
+        base.use_hugepages = args.common.use_hugepages;
         base.post_list = args.common.post_list;
         base.cqe_poll = args.common.cqe_poll;
 
@@ -361,6 +400,9 @@ impl WriteLatencyParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.step_addition = args.common.step_addition;
+        base.max_msg_size = args.common.max_msg_size;
+        base.use_hugepages = args.common.use_hugepages;
 
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;
@@ -411,6 +453,9 @@ impl ReadBandwidthParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.step_addition = args.common.step_addition;
+        base.max_msg_size = args.common.max_msg_size;
+        base.use_hugepages = args.common.use_hugepages;
         base.post_list = args.common.post_list;
         base.cqe_poll = args.common.cqe_poll;
 
@@ -463,6 +508,9 @@ impl ReadLatencyParams {
         base.bidirectional = args.common.bidirectional;
         base.all_sizes = args.common.all_sizes;
         base.step_factor = args.common.step_factor;
+        base.step_addition = args.common.step_addition;
+        base.max_msg_size = args.common.max_msg_size;
+        base.use_hugepages = args.common.use_hugepages;
 
         base.tx_depth = args.tx_depth;
         base.rx_depth = None;

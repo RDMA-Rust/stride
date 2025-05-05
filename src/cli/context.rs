@@ -67,6 +67,36 @@ pub trait CommandContext {
         // Default implementation does nothing
     }
 
+    /// Get the additive factor for message sizes when running all sizes
+    fn step_addition(&self) -> u32 {
+        0
+    }
+
+    /// Set the additive factor for message sizes
+    fn set_step_addition(&mut self, _addition: u32) {
+        // Default implementation does nothing
+    }
+
+    /// Get the maximum message size when running all sizes
+    fn max_msg_size(&self) -> u32 {
+        33_554_432 // Default is 32 MiB
+    }
+
+    /// Set the maximum message size
+    fn set_max_msg_size(&mut self, _max_size: u32) {
+        // Default implementation does nothing
+    }
+
+    /// Whether to use hugepages for memory allocations
+    fn use_hugepages(&self) -> bool {
+        false
+    }
+
+    /// Set whether to use hugepages for memory allocations
+    fn set_use_hugepages(&mut self, _use_hugepages: bool) {
+        // Default implementation does nothing
+    }
+
     /// Create a descriptive name for this operation
     fn operation_name(&self) -> String;
 

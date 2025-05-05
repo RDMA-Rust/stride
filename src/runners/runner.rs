@@ -28,8 +28,8 @@ use crate::connection::session::ConnectionSession;
 use crate::connection::ConnectionParams;
 use crate::connection::EndpointRole;
 use crate::context::device::open_device_context;
-use crate::memory::aligned::{AlignedMemory, DEFAULT_CACHE_LINE_SIZE};
-use crate::memory::MemoryOps;
+use crate::memory::aligned::DEFAULT_CACHE_LINE_SIZE;
+use crate::memory::{AlignedConfig, HugepageConfig, MemoryAllocator, MemoryType};
 use crate::utils::display::{
     BandwidthResult, DisplayOutput, LatencyResult, QueuePairDetail, TestConfiguration, TestType,
 };
@@ -344,21 +344,23 @@ impl<T: CommandContext> TestRunner<T> {
 
         // Handle the all_sizes option
         let msg_sizes = if self.params.all_sizes() {
-            // Generate all message sizes from 2 bytes to 32 MiB
+            // Generate all message sizes based on multiplier and addition
             let mut sizes = Vec::new();
             let step_factor = self.params.step_factor();
+            let step_addition = self.params.step_addition();
+            let max_size = self.params.max_msg_size();
             let mut size = 2; // Start with 2 bytes
 
-            while size <= 33_554_432 {
-                // 32 MiB
+            while size <= max_size {
                 sizes.push(size);
+                // Calculate next size using both multiplication and addition factors
                 // Use ceiling to ensure we don't get stuck at small sizes
-                size = (size as f64 * step_factor).ceil() as u32;
+                size = ((size as f64 * step_factor).ceil() as u32) + step_addition;
             }
 
-            // Make sure we have the exact 32 MiB size at the end
-            if sizes.last() != Some(&33_554_432) {
-                sizes.push(33_554_432);
+            // Make sure we have the exact max size at the end
+            if sizes.last() != Some(&max_size) && sizes.last().is_none_or(|&s| s < max_size) {
+                sizes.push(max_size);
             }
 
             sizes
@@ -392,11 +394,20 @@ impl<T: CommandContext> TestRunner<T> {
         let is_latency = test_type.is_latency();
         let tx_depth = if is_latency { 1 } else { tx_depth };
 
-        // Allocate the largest buffer we'll need based on the maximum message size
         let max_msg_size = *msg_sizes.iter().max().unwrap_or(&base_msg_size);
         let buffer_size = tx_depth as usize * max_msg_size as usize * qp_count;
-        // Create cache-line-aligned memory similar to perftest
-        let memory = AlignedMemory::new(buffer_size, Some(DEFAULT_CACHE_LINE_SIZE), false)?;
+
+        // Determine which memory type to use based on parameters
+        let memory_type = if self.params.use_hugepages() {
+            info!("Using hugepages for memory allocations");
+            MemoryType::Hugepages(HugepageConfig::new(buffer_size))
+        } else {
+            info!("Using aligned memory for allocations");
+            MemoryType::Aligned(AlignedConfig::new(buffer_size, DEFAULT_CACHE_LINE_SIZE))
+        };
+
+        // Create memory using the factory pattern (single call)
+        let memory = MemoryAllocator::allocate(memory_type)?;
 
         let pd = Arc::new(ctx.alloc_pd()?);
         let mr = unsafe {

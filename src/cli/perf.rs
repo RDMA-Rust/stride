@@ -147,10 +147,19 @@ pub struct CommonArgs {
     /// Multiplier between message sizes when using --all-sizes (default is 2x)
     #[arg(long, default_value_t = 2.0)]
     pub step_factor: f64,
+    /// Addition to next message size when using --all-sizes
+    #[arg(long, default_value_t = 0)]
+    pub step_addition: u32,
+    /// Maximum message size when using --all-sizes (default is 32 MiB)
+    #[arg(long, default_value_t = 33_554_432)]
+    pub max_msg_size: u32,
     /// Post list of send WQEs of <list size> size (instead of single post)
     #[arg(long, short = 'l', default_value_t = 1)]
     pub post_list: u32,
     /// Completion queue entry poll batch size (default: 32)
     #[arg(long, default_value_t = 32)]
     pub cqe_poll: u32,
+    /// Use hugepages for memory allocations
+    #[arg(long)]
+    pub use_hugepages: bool,
 }
