@@ -26,6 +26,7 @@ pub struct BaseParams {
     post_list: u32,
     cqe_poll: u32,
     use_hugepages: bool,
+    use_flow_control: bool,
 }
 
 impl Default for BaseParams {
@@ -50,6 +51,7 @@ impl Default for BaseParams {
             post_list: 1,
             cqe_poll: 32,
             use_hugepages: false,
+            use_flow_control: false,
         }
     }
 }
@@ -72,6 +74,7 @@ fn set_common_params(base: &mut BaseParams, common: &CommonArgs) {
     base.use_hugepages = common.use_hugepages;
     base.post_list = common.post_list;
     base.cqe_poll = common.cqe_poll;
+    base.use_flow_control = common.use_flow_control;
 }
 
 macro_rules! impl_command_context_for_base {
@@ -138,6 +141,14 @@ macro_rules! impl_command_context_for_base {
 
         fn set_use_immediate_data(&mut self, use_imm: bool) {
             self.base.use_imm_data = use_imm;
+        }
+
+        fn use_flow_control(&self) -> bool {
+            self.base.use_flow_control
+        }
+
+        fn set_use_flow_control(&mut self, use_flow_control: bool) {
+            self.base.use_flow_control = use_flow_control;
         }
 
         fn all_sizes(&self) -> bool {

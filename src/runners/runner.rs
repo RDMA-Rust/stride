@@ -17,7 +17,7 @@ use sideway::ibverbs::queue_pair::{
     GenericQueuePair, PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
 };
 use sideway::ibverbs::AccessFlags;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +30,7 @@ use crate::connection::EndpointRole;
 use crate::context::device::open_device_context;
 use crate::memory::aligned::DEFAULT_CACHE_LINE_SIZE;
 use crate::memory::{AlignedConfig, HugepageConfig, MemoryAllocator, MemoryType};
+use crate::transport::flow_context;
 use crate::utils::display::{
     BandwidthResult, DisplayOutput, LatencyResult, QueuePairDetail, TestConfiguration, TestType,
 };
@@ -77,6 +78,31 @@ pub struct TestRunner<T: CommandContext> {
 impl<T: CommandContext> TestRunner<T> {
     pub fn new(params: T) -> Self {
         Self { params }
+    }
+
+    // Setup flow control resources for credit-based flow control
+    fn setup_flow_control<'a, 'b>(
+        &self,
+        pd: &'b ProtectionDomain<'a>,
+        rx_depth: u32,
+    ) -> anyhow::Result<Option<flow_context::FlowControlContext<'a>>>
+    where
+        'b: 'a,
+    {
+        // Only setup flow control if it's enabled
+        if !self.params.use_flow_control() {
+            return Ok(None);
+        }
+
+        info!("Setting up flow control with rx_depth={}", rx_depth);
+
+        // Create a flow control context that manages both sender and receiver
+        let mut fc_context = flow_context::FlowControlContext::new(rx_depth)?;
+
+        // Register memory regions for flow control
+        fc_context.register_mr(pd)?;
+
+        Ok(Some(fc_context))
     }
 
     fn setup_connection<'a>(
@@ -334,6 +360,77 @@ impl<T: CommandContext> TestRunner<T> {
         }
     }
 
+    // Check if flow control allows sending
+    #[inline]
+    fn check_send_credits(&self, fc_context: &Option<flow_context::FlowControlContext>) -> bool {
+        // If flow control is not enabled, always allow
+        if fc_context.is_none() {
+            return true;
+        }
+
+        // Otherwise, check credits
+        fc_context
+            .as_ref()
+            .unwrap()
+            .get_sender()
+            .is_none_or(|s| s.has_credit())
+    }
+
+    // Update credit after sending
+    #[inline]
+    fn consume_send_credit(&self, fc_context: &Option<flow_context::FlowControlContext>) {
+        if let Some(fc) = fc_context {
+            if let Some(sender) = fc.get_sender() {
+                sender.consume_credit();
+            }
+        }
+    }
+
+    // Check if should update credits after receiving
+    #[inline]
+    fn check_credit_update(
+        &self,
+        fc_context: &mut Option<flow_context::FlowControlContext>,
+        qp: &mut GenericQueuePair<'_>,
+    ) -> anyhow::Result<()> {
+        if let Some(fc) = fc_context.as_mut() {
+            if let Some(receiver) = fc.get_receiver() {
+                // Process the completion and check if we should send an update
+                if receiver.process_completion() {
+                    // If we need to update, get the processed count
+                    let processed = receiver.get_processed_count();
+                    debug!("Sending credit update: {}", processed);
+
+                    // Get memory info for the credit update
+                    receiver.get_memory_info().and_then(|(rkey, addr)| {
+                        // If we have memory info, post the update through RDMA WRITE
+                        let mut send_guard = qp.start_post_send();
+
+                        let wr_id = (0u64 << 32) | 0xFFFFFFFFu64; // Special marker for credit updates
+                        let send_handle = send_guard
+                            .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                            .setup_write(rkey, addr);
+
+                        unsafe {
+                            send_handle.setup_sge(
+                                // Use the same MR for source and dest
+                                rkey,
+                                // Use the same address for source and dest
+                                addr,
+                                std::mem::size_of::<u32>() as u32,
+                            );
+                        }
+
+                        send_guard.post().ok()?;
+                        trace!("Posted credit update: {}", processed);
+                        Some(())
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Starting {}", self.params.operation_name());
 
@@ -412,6 +509,10 @@ impl<T: CommandContext> TestRunner<T> {
         let memory = MemoryAllocator::allocate(memory_type)?;
 
         let pd = Arc::new(ctx.alloc_pd()?);
+
+        // Setup flow control if enabled
+        let rx_depth = self.params.rx_depth().unwrap_or(512);
+        let mut fc_context = self.setup_flow_control(&pd, rx_depth)?;
         let mr = unsafe {
             pd.reg_mr(
                 memory.get_handle(),
@@ -564,9 +665,15 @@ impl<T: CommandContext> TestRunner<T> {
                             continue;
                         }
 
+                        // Check if flow control allows posting more operations
+                        if !self.check_send_credits(&fc_context) {
+                            continue;
+                        }
+
                         // Post operations until tx_depth is reached or iterations are complete
                         while inflight_per_qp[qp_idx] < tx_depth
                             && qp_iterations[qp_idx] < iterations_per_qp
+                            && self.check_send_credits(&fc_context)
                         {
                             // Get the number of WQEs to post in a single batch
                             let post_list = self
@@ -671,6 +778,9 @@ impl<T: CommandContext> TestRunner<T> {
                             // Post all operations at once
                             guard.post()?;
 
+                            // Consume flow control credit if enabled
+                            self.consume_send_credit(&fc_context);
+
                             // Update the iteration and inflight counters
                             qp_iterations[qp_idx] += post_list as u32;
                             inflight_per_qp[qp_idx] += post_list as u32;
@@ -688,8 +798,18 @@ impl<T: CommandContext> TestRunner<T> {
                             &mut inflight_per_qp,
                             &clock,
                         )?;
+
+                        // Check flow control updates on receive completions
+                        if self.params.server_mode() {
+                            self.check_credit_update(&mut fc_context, &mut qps[0])?;
+                        }
                     } else {
                         self.poll_completions(&cq, &mut inflight_per_qp)?;
+
+                        // Check flow control updates on receive completions
+                        if self.params.server_mode() {
+                            self.check_credit_update(&mut fc_context, &mut qps[0])?;
+                        }
                     }
 
                     all_completed = true;

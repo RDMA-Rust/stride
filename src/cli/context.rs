@@ -47,6 +47,16 @@ pub trait CommandContext {
     /// Set whether immediate data should be used
     fn set_use_immediate_data(&mut self, use_imm: bool);
 
+    /// Whether to use flow control
+    fn use_flow_control(&self) -> bool {
+        false
+    }
+
+    /// Set whether to use flow control
+    fn set_use_flow_control(&mut self, _use_flow_control: bool) {
+        // Default implementation does nothing
+    }
+
     /// Whether to run the test with all message sizes
     fn all_sizes(&self) -> bool {
         false
