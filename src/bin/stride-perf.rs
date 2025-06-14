@@ -1,5 +1,6 @@
 use clap::Parser;
-use stride::cli::plan::{Cli, execute};
+use stride::cli::perf::Cli;
+use stride::cli::plan::execute;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();

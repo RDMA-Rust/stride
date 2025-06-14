@@ -1,9 +1,12 @@
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+
+use crate::cli::plan::{Mode, Operation, Plan, PlanBase, ReadPlan, SendPlan, WritePlan};
 
 #[derive(Parser)]
 #[command(name = "stride-perf")]
 #[command(about = "RDMA performance testing tool")]
-pub struct PerfCli {
+pub struct Cli {
     #[command(subcommand)]
     pub command: PerfCommands,
 }
@@ -21,68 +24,39 @@ pub enum PerfCommands {
 #[derive(Subcommand)]
 pub enum SendCommands {
     #[command(alias = "bw")]
-    Bandwidth(SendBandwidthArgs),
+    Bandwidth(SendOpts),
     #[command(alias = "lat")]
-    Latency(SendLatencyArgs),
+    Latency(SendOpts),
 }
 
 #[derive(Args)]
-pub struct SendBandwidthArgs {
+pub struct SendOpts {
     #[command(flatten)]
-    pub common: CommonArgs,
-    /// Size of Tx queue
-    #[arg(long, short = 't', default_value_t = 128)]
-    pub tx_depth: u32,
+    pub common: CommonOpts,
     /// Size of Rx queue
-    #[arg(long)]
-    pub rx_depth: Option<u32>,
+    #[arg(long, default_value_t = 512)]
+    pub rx_depth: u32,
     /// Use send-with-immediate verb instead of send
     #[arg(long)]
     pub imm_data: bool,
-}
 
-#[derive(Args)]
-pub struct SendLatencyArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
-    /// Size of Tx queue
+    /// Use flow control to prevent sender from overwhelming receiver
     #[arg(long)]
-    pub tx_depth: Option<u32>,
-    /// Size of Rx queue
-    #[arg(long)]
-    pub rx_depth: Option<u32>,
-    /// Use send-with-immediate verb instead of send
-    #[arg(long)]
-    pub imm_data: bool,
+    pub use_flow_control: bool,
 }
 
 #[derive(Subcommand)]
 pub enum WriteCommands {
     #[command(alias = "bw")]
-    Bandwidth(WriteBandwidthArgs),
+    Bandwidth(WriteOpts),
     #[command(alias = "lat")]
-    Latency(WriteLatencyArgs),
+    Latency(WriteOpts),
 }
 
 #[derive(Args)]
-pub struct WriteBandwidthArgs {
+pub struct WriteOpts {
     #[command(flatten)]
-    pub common: CommonArgs,
-    /// Size of Tx queue
-    #[arg(long, short = 't', default_value_t = 128)]
-    pub tx_depth: u32,
-    /// Use write-with-immediate verb instead of write
-    #[arg(long)]
-    pub imm_data: bool,
-}
-
-#[derive(Args)]
-pub struct WriteLatencyArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
-    /// Size of Tx queue
-    #[arg(long, short = 't')]
-    pub tx_depth: Option<u32>,
+    pub common: CommonOpts,
     /// Use write-with-immediate verb instead of write
     #[arg(long)]
     pub imm_data: bool,
@@ -91,29 +65,19 @@ pub struct WriteLatencyArgs {
 #[derive(Subcommand)]
 pub enum ReadCommands {
     #[command(alias = "bw")]
-    Bandwidth(ReadBandwidthArgs),
+    Bandwidth(ReadOpts),
     #[command(alias = "lat")]
-    Latency(ReadLatencyArgs),
+    Latency(ReadOpts),
 }
 
 #[derive(Args)]
-pub struct ReadBandwidthArgs {
+pub struct ReadOpts {
     #[command(flatten)]
-    pub common: CommonArgs,
-    #[arg(long)]
-    pub tx_depth: Option<u32>,
+    pub common: CommonOpts,
 }
 
-#[derive(Args)]
-pub struct ReadLatencyArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
-    #[arg(long)]
-    pub tx_depth: Option<u32>,
-}
-
-#[derive(Args)]
-pub struct CommonArgs {
+#[derive(Args, Debug)]
+pub struct CommonOpts {
     /// Use IB device <DEVICE> [default: first device found]
     #[arg(long, short = 'd')]
     pub device: Option<String>,
@@ -153,6 +117,9 @@ pub struct CommonArgs {
     /// Maximum message size (bytes) when using --all-sizes
     #[arg(long, default_value_t = 33_554_432)]
     pub max_msg_size: u32,
+    /// Size of Tx queue (would be 1 for latency tests)
+    #[arg(long, short = 't', default_value_t = 128)]
+    pub tx_depth: u32,
     /// Post list of send WQEs of <list size> size (instead of single post)
     #[arg(long, short = 'l', default_value_t = 1)]
     pub post_list: u32,
@@ -162,7 +129,137 @@ pub struct CommonArgs {
     /// Use hugepages for memory allocations
     #[arg(long)]
     pub use_hugepages: bool,
-    /// Use flow control to prevent sender from overwhelming receiver
-    #[arg(long)]
-    pub use_flow_control: bool,
+}
+
+impl TryFrom<Cli> for Plan {
+    type Error = anyhow::Error;
+
+    fn try_from(cli: Cli) -> Result<Self> {
+        let (op, mode, common, send_opts, write_opts, read_opts) = match cli.command {
+            PerfCommands::Send(SendCommands::Bandwidth(opts)) => (
+                Operation::Send,
+                Mode::Bandwidth,
+                opts.common,
+                Some((opts.rx_depth, opts.imm_data, opts.use_flow_control)),
+                None,
+                None,
+            ),
+            PerfCommands::Send(SendCommands::Latency(opts)) => (
+                Operation::Send,
+                Mode::Latency,
+                opts.common,
+                Some((opts.rx_depth, opts.imm_data, opts.use_flow_control)),
+                None,
+                None,
+            ),
+            PerfCommands::Write(WriteCommands::Bandwidth(opts)) => (
+                Operation::Write,
+                Mode::Bandwidth,
+                opts.common,
+                None,
+                Some(opts.imm_data),
+                None,
+            ),
+            PerfCommands::Write(WriteCommands::Latency(opts)) => (
+                Operation::Write,
+                Mode::Latency,
+                opts.common,
+                None,
+                Some(opts.imm_data),
+                None,
+            ),
+            PerfCommands::Read(ReadCommands::Bandwidth(opts)) => (
+                Operation::Read,
+                Mode::Bandwidth,
+                opts.common,
+                None,
+                None,
+                Some(()),
+            ),
+            PerfCommands::Read(ReadCommands::Latency(opts)) => (
+                Operation::Read,
+                Mode::Latency,
+                opts.common,
+                None,
+                None,
+                Some(()),
+            ),
+        };
+
+        /* expand sizes once */
+        let msg_sizes = if common.all_sizes {
+            let mut v = vec![2];
+            let mut size = 2;
+            while size < common.max_msg_size {
+                size = ((size as f64 * common.step_factor).ceil() as u32) + common.step_addition;
+                v.push(size.min(common.max_msg_size));
+            }
+            v
+        } else {
+            vec![common.msg_size]
+        };
+
+        // Determine server mode and address
+        let (server, addr) = if let Some(target_addr) = common.server_address {
+            (false, format!("{}:{}", target_addr, common.port))
+        } else {
+            (true, format!("0.0.0.0:{}", common.port))
+        };
+
+        // Create common base
+        let base = PlanBase {
+            mode,
+            dev: common.device,
+            gid_index: common.gid_index,
+            server,
+            addr,
+            threads: common.qp_count as usize,
+            msg_sizes,
+            iters: common.iters,
+            bidir: common.bidirectional,
+            /* verbs */
+            tx_depth: if mode == Mode::Latency {
+                1
+            } else {
+                common.tx_depth
+            },
+            timeout: common.qp_timeout,
+            post_list: common.post_list,
+            cqe_poll: common.cqe_poll,
+            hugepages: common.use_hugepages,
+        };
+
+        // Create operation-specific plan
+        let plan = match op {
+            Operation::Send => {
+                let (rx_depth, imm_data, use_flow_control) = send_opts.unwrap();
+                Plan::Send(SendPlan {
+                    base,
+                    rx_depth,
+                    imm_data,
+                    flow_control: use_flow_control,
+                })
+            }
+            Operation::Write => {
+                let imm_data = write_opts.unwrap();
+                Plan::Write(WritePlan {
+                    base,
+                    imm_data,
+                    remote_mr: None, // Set during connection setup
+                })
+            }
+            Operation::Read => {
+                let _unit = read_opts.unwrap();
+                Plan::Read(ReadPlan {
+                    base,
+                    remote_mr: None, // Set during connection setup
+                })
+            }
+            Operation::Atomic => {
+                return Err(anyhow::anyhow!("Atomic operations not yet implemented"));
+            }
+        };
+
+        Ok(plan)
+    }
 }

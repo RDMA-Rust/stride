@@ -618,7 +618,8 @@ impl PlanTestRunner {
                         {
                             // Get the number of WQEs to post in a single batch
                             let post_list = self
-                                .plan.base()
+                                .plan
+                                .base()
                                 .post_list
                                 .min(
                                     // Don't post more than what's left for this QP
