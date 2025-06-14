@@ -22,7 +22,7 @@ use tracing::{debug, trace};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::cli::context::CommandContext;
+use crate::cli::plan::Plan;
 use crate::connection::exchange::TestResults;
 use crate::connection::session::ConnectionSession;
 use crate::connection::ConnectionParams;
@@ -70,14 +70,14 @@ fn increase_addr_with_alignment(
 fn align_to_cache_line(size: usize) -> usize {
     size.div_ceil(HUGE_PAGE_SIZE) * CACHE_LINE_SIZE
 }
-
-pub struct TestRunner<T: CommandContext> {
-    params: T,
+// New implementation for Plan
+pub struct PlanTestRunner {
+    plan: Plan,
 }
 
-impl<T: CommandContext> TestRunner<T> {
-    pub fn new(params: T) -> Self {
-        Self { params }
+impl PlanTestRunner {
+    pub fn new(plan: Plan) -> Self {
+        Self { plan }
     }
 
     // Setup flow control resources for credit-based flow control
@@ -90,7 +90,7 @@ impl<T: CommandContext> TestRunner<T> {
         'b: 'a,
     {
         // Only setup flow control if it's enabled
-        if !self.params.use_flow_control() {
+        if !self.plan.uses_flow_control() {
             return Ok(None);
         }
 
@@ -113,8 +113,8 @@ impl<T: CommandContext> TestRunner<T> {
         mr: &MemoryRegion,
         qp_details: &mut [QueuePairDetail],
     ) -> Result<(ConnectionSetupResult, ConnectionSession<'a>)> {
-        let gid_index = self.params.gid_index().unwrap_or(0);
-        let server_mode = self.params.server_mode();
+        let gid_index = self.plan.base().gid_index.unwrap_or(0);
+        let server_mode = self.plan.base().server;
 
         // Create connection parameters
         let mut conn_params = ConnectionParams {
@@ -129,7 +129,7 @@ impl<T: CommandContext> TestRunner<T> {
         };
 
         // Adjust timeout based on QP timeout parameter
-        let timeout_factor = self.params.qp_timeout();
+        let timeout_factor = self.plan.base().timeout;
         conn_params.timeout = Duration::from_micros(4 * (1u64 << timeout_factor));
 
         let mut session =
@@ -139,18 +139,8 @@ impl<T: CommandContext> TestRunner<T> {
         let _ = session.initialize();
 
         // Establish connection
-        let address = if server_mode {
-            format!("0.0.0.0:{}", self.params.port().unwrap_or(18515))
-        } else {
-            let target = self.params.address().unwrap_or_else(|| {
-                info!("No target address specified, using localhost");
-                "127.0.0.1".to_string()
-            });
-
-            format!("{}:{}", target, self.params.port().unwrap_or(18515))
-        };
-
-        session.establish_connection(&address)?;
+        let address = &self.plan.base().addr;
+        session.establish_connection(address)?;
         let actual_mtu = 4096;
 
         let gid_entry = ctx.query_gid_ex(1, gid_index as u32)?;
@@ -188,10 +178,6 @@ impl<T: CommandContext> TestRunner<T> {
             session.exchange_memory_regions(mr.get_ptr() as u64, mr.rkey(), mr.region_len())?;
 
         session.synchronize_qps()?;
-
-        // Close connection
-        // println!("Connection setup complete, closing control connection");
-        // session.close()?;
 
         Ok((
             ConnectionSetupResult {
@@ -238,17 +224,8 @@ impl<T: CommandContext> TestRunner<T> {
                             let completion_time = clock.now();
 
                             // Calculate latency
-                            // let latency_ns = if wc.wc_flags()
-                            //     & CreateCompletionQueueWorkCompletionFlags::CompletionTimestamp.bi
-                            //     != 0
-                            // {
-                            //     // Use hardware timestamp if available
-                            //     wc.completion_timestamp() as u64
-                            // } else {
-                            // Fall back to software timing
                             let latency_ns =
                                 completion_time.duration_since(start_time).into_nanos();
-                            // };
 
                             // Record latency
                             histogram.record(latency_ns)?;
@@ -272,7 +249,7 @@ impl<T: CommandContext> TestRunner<T> {
         inflight_per_qp: &mut [u32],
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Get the CQE poll batch size from parameters
-        let poll_batch_size = self.params.cqe_poll() as usize;
+        let poll_batch_size = self.plan.poll_batch() as usize;
 
         // Poll completions in batches (like perftest's CTX_POLL_BATCH)
         if let Ok(poller) = cq.start_poll() {
@@ -432,72 +409,36 @@ impl<T: CommandContext> TestRunner<T> {
     }
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("Starting {}", self.params.operation_name());
+        info!("Starting {}", self.plan.test_name());
 
-        // Default device fallback
-        let device_name = self.params.device();
-        let iterations = self.params.iterations();
-        let base_msg_size = self.params.message_size();
-        let tx_depth = self.params.tx_depth().unwrap_or(512);
-        let qp_count = self.params.qp_count().unwrap_or(1);
-
-        // Handle the all_sizes option
-        let msg_sizes = if self.params.all_sizes() {
-            // Generate all message sizes based on multiplier and addition
-            let mut sizes = Vec::new();
-            let step_factor = self.params.step_factor();
-            let step_addition = self.params.step_addition();
-            let max_size = self.params.max_msg_size();
-            let mut size = 2; // Start with 2 bytes
-
-            while size <= max_size {
-                sizes.push(size);
-                // Calculate next size using both multiplication and addition factors
-                // Use ceiling to ensure we don't get stuck at small sizes
-                size = ((size as f64 * step_factor).ceil() as u32) + step_addition;
-            }
-
-            // Make sure we have the exact max size at the end
-            if sizes.last() != Some(&max_size) && sizes.last().is_none_or(|&s| s < max_size) {
-                sizes.push(max_size);
-            }
-
-            sizes
-        } else {
-            // Just use the single specified message size
-            vec![base_msg_size]
-        };
+        // Get parameters from plan
+        let device_name = self.plan.base().dev.as_deref();
+        let iterations = self.plan.base().iters;
+        let msg_sizes = &self.plan.base().msg_sizes;
+        let tx_depth = self.plan.base().tx_depth;
+        let qp_count = self.plan.base().threads;
 
         info!("Will test {} message sizes", msg_sizes.len());
 
         let ctx = Arc::new(open_device_context(device_name)?);
-        // Determine test type
-        let test_type = if self.params.operation_name().contains("SEND") {
-            if self.params.operation_name().contains("latency") {
-                TestType::SendLatency
-            } else {
-                TestType::SendBandwidth
-            }
-        } else if self.params.operation_name().contains("WRITE") {
-            if self.params.operation_name().contains("latency") {
-                TestType::WriteLatency
-            } else {
-                TestType::WriteBandwidth
-            }
-        } else if self.params.operation_name().contains("latency") {
-            TestType::ReadLatency
-        } else {
-            TestType::ReadBandwidth
+
+        // Determine test type based on operation and mode
+        let test_type = match (self.plan.operation(), self.plan.is_latency()) {
+            (crate::cli::plan::Operation::Send, true) => TestType::SendLatency,
+            (crate::cli::plan::Operation::Send, false) => TestType::SendBandwidth,
+            (crate::cli::plan::Operation::Write, true) => TestType::WriteLatency,
+            (crate::cli::plan::Operation::Write, false) => TestType::WriteBandwidth,
+            (crate::cli::plan::Operation::Read, true) => TestType::ReadLatency,
+            (crate::cli::plan::Operation::Read, false) => TestType::ReadBandwidth,
+            _ => TestType::SendBandwidth, // fallback
         };
 
         let is_latency = test_type.is_latency();
-        let tx_depth = if is_latency { 1 } else { tx_depth };
-
-        let max_msg_size = *msg_sizes.iter().max().unwrap_or(&base_msg_size);
+        let max_msg_size = *msg_sizes.iter().max().unwrap_or(&65536);
         let buffer_size = tx_depth as usize * max_msg_size as usize * qp_count;
 
         // Determine which memory type to use based on parameters
-        let memory_type = if self.params.use_hugepages() {
+        let memory_type = if self.plan.base().hugepages {
             info!("Using hugepages for memory allocations");
             MemoryType::Hugepages(HugepageConfig::new(buffer_size))
         } else {
@@ -511,7 +452,7 @@ impl<T: CommandContext> TestRunner<T> {
         let pd = Arc::new(ctx.alloc_pd()?);
 
         // Setup flow control if enabled
-        let rx_depth = self.params.rx_depth().unwrap_or(512);
+        let rx_depth = self.plan.rx_depth().unwrap_or(512);
         let mut fc_context = self.setup_flow_control(&pd, rx_depth)?;
         let mr = unsafe {
             pd.reg_mr(
@@ -530,7 +471,6 @@ impl<T: CommandContext> TestRunner<T> {
             .into();
 
         let mut builder = pd.create_qp_builder();
-        let qp_count = self.params.qp_count().unwrap_or(1);
 
         // Create a new histogram for all tests
         let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
@@ -565,9 +505,10 @@ impl<T: CommandContext> TestRunner<T> {
             .setup_connection(ctx.clone(), pd.clone(), &mut qps, &mr, &mut qp_details)
             .unwrap();
 
-        // Create a shared DisplayOutput for consolidated results if using all_sizes
-        let mut shared_display = if self.params.all_sizes() {
-            // If we're using all_sizes, we'll create one shared DisplayOutput for all results
+        // Create a shared DisplayOutput for consolidated results if using multiple sizes
+        let multiple_sizes = msg_sizes.len() > 1;
+        let mut shared_display = if multiple_sizes {
+            // If we're using multiple sizes, we'll create one shared DisplayOutput for all results
             let config = TestConfiguration {
                 device: ctx.name(),
                 transport: ctx.transport_type().to_string(),
@@ -575,9 +516,9 @@ impl<T: CommandContext> TestRunner<T> {
                 connection_type: "RC".to_string(),
                 mtu: conn_result.actual_mtu,
                 gid_type: format!("{:?}", conn_result.gid_type),
-                rx_depth: self.params.rx_depth().unwrap_or(512),
+                rx_depth,
                 tx_depth,
-                post_list: self.params.post_list(),
+                post_list: self.plan.base().post_list,
                 test_type,
             };
 
@@ -590,7 +531,7 @@ impl<T: CommandContext> TestRunner<T> {
             None
         };
 
-        for msg_size in msg_sizes {
+        for &msg_size in msg_sizes {
             info!(message_size = msg_size, "Running test.");
 
             // Reset the histogram for each size
@@ -607,16 +548,16 @@ impl<T: CommandContext> TestRunner<T> {
                         connection_type: "RC".to_string(),
                         mtu: conn_result.actual_mtu,
                         gid_type: format!("{:?}", conn_result.gid_type),
-                        rx_depth: self.params.rx_depth().unwrap_or(512),
+                        rx_depth,
                         tx_depth,
-                        post_list: self.params.post_list(),
+                        post_list: self.plan.base().post_list,
                         test_type,
                     },
                     qp_details.clone(),
                     vec![conn_result.local_gid, conn_result.remote_gid],
                 )
             } else {
-                // When using all-sizes mode, this is just a dummy display since we use shared_display
+                // When using multiple-sizes mode, this is just a dummy display since we use shared_display
                 DisplayOutput::new(
                     TestConfiguration {
                         device: ctx.name(),
@@ -625,9 +566,9 @@ impl<T: CommandContext> TestRunner<T> {
                         connection_type: "RC".to_string(),
                         mtu: conn_result.actual_mtu,
                         gid_type: format!("{:?}", conn_result.gid_type),
-                        rx_depth: self.params.rx_depth().unwrap_or(512),
+                        rx_depth,
                         tx_depth,
-                        post_list: self.params.post_list(),
+                        post_list: self.plan.base().post_list,
                         test_type,
                     },
                     Vec::new(),
@@ -635,8 +576,8 @@ impl<T: CommandContext> TestRunner<T> {
                 )
             };
 
-            let is_server = self.params.server_mode();
-            let is_bidirectional = self.params.bidirectional();
+            let is_server = self.plan.base().server;
+            let is_bidirectional = self.plan.base().bidir;
             let remote_mr = conn_result.remote_mr;
 
             let iterations_per_qp = iterations;
@@ -649,7 +590,7 @@ impl<T: CommandContext> TestRunner<T> {
                 let start_time = clock.now();
 
                 // Execute the test based on operation type
-                let is_write = self.params.operation_name().contains("WRITE");
+                let is_write = self.plan.needs_remote_addr();
 
                 let mut all_completed = false;
 
@@ -677,8 +618,8 @@ impl<T: CommandContext> TestRunner<T> {
                         {
                             // Get the number of WQEs to post in a single batch
                             let post_list = self
-                                .params
-                                .post_list()
+                                .plan.base()
+                                .post_list
                                 .min(
                                     // Don't post more than what's left for this QP
                                     iterations_per_qp - qp_iterations[qp_idx],
@@ -707,7 +648,6 @@ impl<T: CommandContext> TestRunner<T> {
                                 let base_addr = mr.get_ptr() as u64 + qp_offset as u64;
 
                                 // Set up cycle buffer size - will wrap around after this many bytes
-                                // This is equivalent to ctx->cycle_buffer in perftest
                                 let cycle_buffer_size = buffer_region_size as u32;
 
                                 // Get current iteration for this QP
@@ -800,14 +740,14 @@ impl<T: CommandContext> TestRunner<T> {
                         )?;
 
                         // Check flow control updates on receive completions
-                        if self.params.server_mode() {
+                        if is_server {
                             self.check_credit_update(&mut fc_context, &mut qps[0])?;
                         }
                     } else {
                         self.poll_completions(&cq, &mut inflight_per_qp)?;
 
                         // Check flow control updates on receive completions
-                        if self.params.server_mode() {
+                        if is_server {
                             self.check_credit_update(&mut fc_context, &mut qps[0])?;
                         }
                     }
@@ -894,7 +834,7 @@ impl<T: CommandContext> TestRunner<T> {
                     }
                 }
 
-                // Display individual results immediately if not in all-sizes mode
+                // Display individual results immediately if not in multi-sizes mode
                 if shared_display.is_none() {
                     display.display();
                 }
@@ -917,7 +857,7 @@ impl<T: CommandContext> TestRunner<T> {
                                 max_latency = format!("{:.5} us", lat_results.max_latency),
                                 p99_latency = format!("{:.5} us", lat_results.p99_latency),
                                 p999_latency = format!("{:.5} us", lat_results.p999_latency),
-                                "Received latency test results from server."
+                                "Received latency test results from client."
                             );
 
                             if let Some(shared) = &mut shared_display {
@@ -936,7 +876,7 @@ impl<T: CommandContext> TestRunner<T> {
                                 iterations = test_results.iterations,
                                 bandwidth = format!("{:.5} Gbps", bw_results.bandwidth),
                                 mpps = format!("{:.5} Mpps", bw_results.msg_rate),
-                                "Received bandwidth test results from server."
+                                "Received bandwidth test results from client."
                             );
 
                             if let Some(shared) = &mut shared_display {
@@ -948,19 +888,17 @@ impl<T: CommandContext> TestRunner<T> {
                     }
                 }
 
-                // Display individual results immediately if not in all-sizes mode
+                // Display individual results immediately if not in multi-sizes mode
                 if shared_display.is_none() {
                     display.display();
                 }
             }
-
-            // We don't close the session after each test anymore since we're reusing it
         }
 
         // Close the session after all tests are complete
         session.close()?;
 
-        // Display consolidated results if in all-sizes mode
+        // Display consolidated results if in multi-sizes mode
         if let Some(shared) = shared_display {
             println!("\n{}", "-".repeat(80));
             println!("Consolidated results for all message sizes:");
