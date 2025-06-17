@@ -11,6 +11,7 @@ use sideway::ibverbs::queue_pair::{
 };
 use sideway::ibverbs::AccessFlags;
 use utils::display::{BandwidthResult, DisplayOutput, QueuePairDetail, TestConfiguration};
+use runners::plan::OutputConfig;
 use byte_unit::{Byte, UnitType};
 
 mod connection;
@@ -249,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let gid_info = vec![gid, gid_2];
 
-            let mut display = DisplayOutput::new(config, qp_details, gid_info);
+            let mut display = DisplayOutput::new(config, qp_details, gid_info, OutputConfig::default());
 
             let memory = SystemMemory::new((tx_depth as usize * msg_size as usize) as usize, None).unwrap();
             let pd = ctx.alloc_pd().unwrap();

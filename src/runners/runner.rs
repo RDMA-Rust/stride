@@ -526,6 +526,7 @@ impl PlanTestRunner {
                 config,
                 qp_details.clone(),
                 vec![conn_result.local_gid, conn_result.remote_gid],
+                self.plan.base().output.clone(),
             ))
         } else {
             None
@@ -555,6 +556,7 @@ impl PlanTestRunner {
                     },
                     qp_details.clone(),
                     vec![conn_result.local_gid, conn_result.remote_gid],
+                    self.plan.base().output.clone(),
                 )
             } else {
                 // When using multiple-sizes mode, this is just a dummy display since we use shared_display
@@ -573,6 +575,7 @@ impl PlanTestRunner {
                     },
                     Vec::new(),
                     Vec::new(),
+                    self.plan.base().output.clone(),
                 )
             };
 
@@ -901,9 +904,11 @@ impl PlanTestRunner {
 
         // Display consolidated results if in multi-sizes mode
         if let Some(shared) = shared_display {
-            println!("\n{}", "-".repeat(80));
-            println!("Consolidated results for all message sizes:");
-            println!("{}", "-".repeat(80));
+            if self.plan.base().output.tui_enabled {
+                println!("\n{}", "-".repeat(80));
+                println!("Consolidated results for all message sizes:");
+                println!("{}", "-".repeat(80));
+            }
             shared.display();
         }
 

@@ -61,6 +61,7 @@ pub fn probe_devices(
     detailed: bool,
     _show_numa: bool,
     filter_device: Option<&str>,
+    tui_enabled: bool,
 ) -> anyhow::Result<()> {
     let device_list = sideway::ibverbs::device::DeviceList::new()?;
 
@@ -75,7 +76,9 @@ pub fn probe_devices(
         let attr = context.query_device()?;
         let info = DeviceDetail::from_device_attr(&attr);
 
-        println!("{}: {}", context.name(), info.description());
+        if tui_enabled {
+            println!("{}: {}", context.name(), info.description());
+        }
 
         if detailed {
             // Print detailed device information
@@ -84,14 +87,16 @@ pub fn probe_devices(
 
         for i in 1..=attr.phys_port_cnt() {
             let port_attr = context.query_port(i)?;
-            println!(
-                "    Port {i}: {:?} ({} Gbps), {:?}, total data rate: {} Gbps",
-                port_attr.active_speed(),
-                port_attr.active_speed().to_throughput(),
-                port_attr.active_width(),
-                port_attr.active_speed().to_throughput()
-                    * ((port_attr.active_width() as u32) as f64)
-            );
+            if tui_enabled {
+                println!(
+                    "    Port {i}: {:?} ({} Gbps), {:?}, total data rate: {} Gbps",
+                    port_attr.active_speed(),
+                    port_attr.active_speed().to_throughput(),
+                    port_attr.active_width(),
+                    port_attr.active_speed().to_throughput()
+                        * ((port_attr.active_width() as u32) as f64)
+                );
+            }
         }
     }
 

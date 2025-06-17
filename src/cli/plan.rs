@@ -1,6 +1,21 @@
 use crate::connection::exchange::MemoryRegionInfo;
 
 #[derive(Debug, Clone)]
+pub struct OutputConfig {
+    pub tui_enabled: bool,
+    pub trace_enabled: bool,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            tui_enabled: true,
+            trace_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PlanBase {
     pub mode: Mode,
     pub dev: Option<String>,
@@ -16,6 +31,7 @@ pub struct PlanBase {
     pub post_list: u32,
     pub cqe_poll: u32,
     pub hugepages: bool,
+    pub output: OutputConfig,
 }
 
 #[derive(Debug, Clone)]

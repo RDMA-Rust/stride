@@ -1,12 +1,18 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
-use crate::cli::plan::{Mode, Operation, Plan, PlanBase, ReadPlan, SendPlan, WritePlan};
+use crate::cli::plan::{Mode, Operation, OutputConfig, Plan, PlanBase, ReadPlan, SendPlan, WritePlan};
 
 #[derive(Parser)]
 #[command(name = "stride-perf")]
 #[command(about = "RDMA performance testing tool")]
 pub struct Cli {
+    /// Enable trace-level logging output
+    #[arg(long)]
+    pub trace: bool,
+    /// Enable TUI (terminal user interface) output (enabled by default)
+    #[arg(long)]
+    pub tui: bool,
     #[command(subcommand)]
     pub command: PerfCommands,
 }
@@ -206,6 +212,17 @@ impl TryFrom<Cli> for Plan {
             (true, format!("0.0.0.0:{}", common.port))
         };
 
+        // Determine output configuration based on CLI flags
+        let output = OutputConfig {
+            trace_enabled: cli.trace,
+            // TUI is enabled by default, but disabled when trace is enabled unless both are explicitly provided
+            tui_enabled: if cli.trace && !cli.tui {
+                false // Trace enabled, TUI not explicitly enabled -> disable TUI
+            } else {
+                true // Default case or both flags provided
+            },
+        };
+
         // Create common base
         let base = PlanBase {
             mode,
@@ -227,6 +244,7 @@ impl TryFrom<Cli> for Plan {
             post_list: common.post_list,
             cqe_poll: common.cqe_poll,
             hugepages: common.use_hugepages,
+            output,
         };
 
         // Create operation-specific plan

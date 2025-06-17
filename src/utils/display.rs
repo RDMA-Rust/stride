@@ -6,6 +6,17 @@ use tabled::{
     Table, Tabled,
 };
 
+use crate::cli::plan::OutputConfig;
+
+// Macro for conditional TUI output
+macro_rules! tui_println {
+    ($self:expr, $($arg:tt)*) => {
+        if $self.output_config.tui_enabled {
+            println!($($arg)*);
+        }
+    };
+}
+
 // Display configuration constants
 pub const DEFAULT_HEADER_WIDTH: usize = 90;
 pub const DEFAULT_LAT_HEADER_WIDTH: usize = 140;
@@ -185,6 +196,7 @@ pub struct DisplayOutput {
     // Collections for multiple results when using --all-sizes
     bw_results_collection: Vec<BandwidthResult>,
     lat_results_collection: Vec<LatencyResult>,
+    output_config: OutputConfig,
 }
 
 fn format_bandwidth(f: &f64) -> String {
@@ -242,6 +254,7 @@ impl DisplayOutput {
         config: TestConfiguration,
         qp_details: Vec<QueuePairDetail>,
         gid_info: Vec<Gid>,
+        output_config: OutputConfig,
     ) -> Self {
         Self {
             config,
@@ -251,6 +264,7 @@ impl DisplayOutput {
             lat_results: None,
             bw_results_collection: Vec::new(),
             lat_results_collection: Vec::new(),
+            output_config,
         }
     }
 
@@ -278,7 +292,8 @@ impl DisplayOutput {
             return;
         }
 
-        println!(
+        tui_println!(
+            self,
             "{}",
             create_header("Bandwidth Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
         );
@@ -322,7 +337,7 @@ impl DisplayOutput {
             .modify(Columns::single(4), Width::increase(time_column_width))
             .to_string();
 
-        println!("{}", table);
+        tui_println!(self, "{}", table);
     }
 
     // Display a consolidated table of latency results
@@ -331,7 +346,8 @@ impl DisplayOutput {
             return;
         }
 
-        println!(
+        tui_println!(
+            self,
             "{}",
             create_header("Latency Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
         );
@@ -387,7 +403,7 @@ impl DisplayOutput {
             .modify(Columns::single(8), Width::increase(p999_column_width))
             .to_string();
 
-        println!("{}", table);
+        tui_println!(self, "{}", table);
     }
 
     fn format_qp_details(&self) -> String {
@@ -409,7 +425,8 @@ impl DisplayOutput {
     pub fn display(&self) {
         let header_width = header_width!(for_test self.config.test_type);
 
-        println!(
+        tui_println!(
+            self,
             "{}",
             create_header(
                 &format!("{}", self.config.test_type),
@@ -417,9 +434,10 @@ impl DisplayOutput {
                 DEFAULT_HEADER_MARGIN_LEN
             )
         );
-        println!("{}", self.config);
+        tui_println!(self, "{}", self.config);
 
-        println!(
+        tui_println!(
+            self,
             "{}",
             create_header(
                 "Connection Details",
@@ -427,7 +445,7 @@ impl DisplayOutput {
                 DEFAULT_HEADER_MARGIN_LEN
             )
         );
-        println!("{}\n", self.format_qp_details());
+        tui_println!(self, "{}\n", self.format_qp_details());
 
         let style = Style::ascii()
             .horizontals([(1, HorizontalLine::inherit(Style::modern()).horizontal('-'))])
@@ -438,7 +456,8 @@ impl DisplayOutput {
             .intersection_bottom('-');
 
         if let Some(results) = &self.bw_results {
-            println!(
+            tui_println!(
+                self,
                 "{}",
                 create_header("Bandwidth Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
             );
@@ -484,11 +503,12 @@ impl DisplayOutput {
                 .modify(Columns::single(4), Width::increase(time_column_width))
                 .to_string();
 
-            println!("{}", table);
+            tui_println!(self, "{}", table);
         }
 
         if let Some(results) = &self.lat_results {
-            println!(
+            tui_println!(
+                self,
                 "{}",
                 create_header("Latency Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
             );
@@ -546,7 +566,7 @@ impl DisplayOutput {
                 .modify(Columns::single(8), Width::increase(p999_column_width))
                 .to_string();
 
-            println!("{}", table);
+            tui_println!(self, "{}", table);
         }
 
         if !self.bw_results_collection.is_empty() {
