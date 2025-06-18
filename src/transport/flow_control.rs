@@ -13,7 +13,7 @@ use sideway::ibverbs::queue_pair::{
 use sideway::ibverbs::AccessFlags;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tracing::{debug, trace};
+use tracing::debug;
 
 /// Flow control state for managing sender credits
 #[derive(Debug, Clone)]

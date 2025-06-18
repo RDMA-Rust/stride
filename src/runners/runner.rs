@@ -505,10 +505,10 @@ impl PlanTestRunner {
             .setup_connection(ctx.clone(), pd.clone(), &mut qps, &mr, &mut qp_details)
             .unwrap();
 
-        // Create a shared DisplayOutput for consolidated results if using multiple sizes
+        // Create a shared DisplayOutput for streaming results if using multiple sizes
         let multiple_sizes = msg_sizes.len() > 1;
-        let mut shared_display = if multiple_sizes {
-            // If we're using multiple sizes, we'll create one shared DisplayOutput for all results
+        let (shared_display, mut streaming_formatter) = if multiple_sizes {
+            // If we're using multiple sizes, we'll create one shared DisplayOutput for streaming
             let config = TestConfiguration {
                 device: ctx.name(),
                 transport: ctx.transport_type().to_string(),
@@ -522,14 +522,33 @@ impl PlanTestRunner {
                 test_type,
             };
 
-            Some(DisplayOutput::new(
+            let display = DisplayOutput::new(
                 config,
                 qp_details.clone(),
                 vec![conn_result.local_gid, conn_result.remote_gid],
                 self.plan.base().output.clone(),
-            ))
+            );
+
+            // Display header information once
+            let header_width = if test_type.is_latency() {
+                crate::utils::display::DEFAULT_LAT_HEADER_WIDTH
+            } else {
+                crate::utils::display::DEFAULT_HEADER_WIDTH
+            };
+
+            // Display test configuration and connection details
+            display.display_headers_only(header_width);
+
+            // Initialize streaming table
+            let formatter = if test_type.is_latency() {
+                display.init_latency_streaming_table(header_width).ok()
+            } else {
+                display.init_bandwidth_streaming_table(header_width).ok()
+            };
+
+            (Some(display), formatter)
         } else {
-            None
+            (None, None)
         };
 
         for &msg_size in msg_sizes {
@@ -785,9 +804,11 @@ impl PlanTestRunner {
                         max_latency_ns,
                     );
 
-                    if let Some(shared) = &mut shared_display {
-                        // Add to collection for consolidated display at the end
-                        shared.add_latency_result(lat_results.clone());
+                    if let Some(_shared) = &shared_display {
+                        // Stream result immediately
+                        if let Some(ref mut formatter) = streaming_formatter {
+                            let _ = formatter.print_row_data(&lat_results);
+                        }
                     } else {
                         // Set single result (legacy mode)
                         display.set_latency_results(lat_results.clone());
@@ -814,9 +835,11 @@ impl PlanTestRunner {
                         time.as_secs_f64(),
                     );
 
-                    if let Some(shared) = &mut shared_display {
-                        // Add to collection for consolidated display at the end
-                        shared.add_bandwidth_result(bw_results.clone());
+                    if let Some(_shared) = &shared_display {
+                        // Stream result immediately
+                        if let Some(ref mut formatter) = streaming_formatter {
+                            let _ = formatter.print_row_data(&bw_results);
+                        }
                     } else {
                         // Set single result (legacy mode)
                         display.set_bandwidth_results(bw_results.clone());
@@ -864,8 +887,11 @@ impl PlanTestRunner {
                                 "Received latency test results from client."
                             );
 
-                            if let Some(shared) = &mut shared_display {
-                                shared.add_latency_result(lat_results);
+                            if let Some(_shared) = &shared_display {
+                                // Stream result immediately
+                                if let Some(ref mut formatter) = streaming_formatter {
+                                    let _ = formatter.print_row_data(&lat_results);
+                                }
                             } else {
                                 display.set_latency_results(lat_results);
                             }
@@ -883,8 +909,11 @@ impl PlanTestRunner {
                                 "Received bandwidth test results from client."
                             );
 
-                            if let Some(shared) = &mut shared_display {
-                                shared.add_bandwidth_result(bw_results);
+                            if let Some(_shared) = &shared_display {
+                                // Stream result immediately
+                                if let Some(ref mut formatter) = streaming_formatter {
+                                    let _ = formatter.print_row_data(&bw_results);
+                                }
                             } else {
                                 display.set_bandwidth_results(bw_results);
                             }
@@ -902,14 +931,14 @@ impl PlanTestRunner {
         // Close the session after all tests are complete
         session.close()?;
 
-        // Display consolidated results if in multi-sizes mode
-        if let Some(shared) = shared_display {
-            if self.plan.base().output.tui_enabled {
-                println!("\n{}", "-".repeat(80));
-                println!("Consolidated results for all message sizes:");
-                println!("{}", "-".repeat(80));
+        // For multi-sizes mode, add closing separator and newline
+        if shared_display.is_some() {
+            if let Some(formatter) = streaming_formatter {
+                let _ = formatter.print_bottom_separator();
             }
-            shared.display();
+            if self.plan.base().output.tui_enabled {
+                println!();
+            }
         }
 
         Ok(())
