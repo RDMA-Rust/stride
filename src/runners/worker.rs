@@ -1,6 +1,303 @@
 use crate::cli::plan::Plan;
-use crate::runners::runner::PlanTestRunner;
+use crate::memory::MemoryOps;
 use anyhow::Result;
+use sideway::ibverbs::completion::{ExtendedCompletionQueue, CreateCompletionQueueWorkCompletionFlags};
+use sideway::ibverbs::device_context::DeviceContext;
+use sideway::ibverbs::memory_region::MemoryRegion;
+use sideway::ibverbs::protection_domain::ProtectionDomain;
+use sideway::ibverbs::queue_pair::GenericQueuePair;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+use tracing::{debug, info};
+
+/// Worker that owns all RDMA resources needed for independent operation
+/// This is the parent struct that has stable addresses for borrowing
+pub struct Worker<'a> {
+    /// Primary memory region for this worker
+    pub memory_region: MemoryRegion<'a>,
+    /// Optional additional memory regions (for multi-buffer scenarios)
+    pub additional_memory_regions: Vec<MemoryRegion<'a>>,
+    /// Memory allocator handle (for cleanup)
+    pub memory: Box<dyn MemoryOps>,
+    /// Protection domain (shared across workers)
+    pub pd: Arc<ProtectionDomain<'a>>,
+    /// Device context (shared across workers)
+    pub device: Arc<DeviceContext>,
+    /// Test plan configuration
+    pub plan: Plan,
+    /// Worker thread identifier
+    pub thread_id: usize,
+    /// TX depth for queue pairs
+    pub tx_depth: u32,
+    /// RX depth for queue pairs
+    pub rx_depth: Option<u32>,
+}
+
+/// Worker context that contains all resources needed for a thread worker
+/// to execute RDMA operations independently. Uses Rc<RefCell<>> for single-threaded
+/// performance while handling self-referential lifetime issues safely.
+///
+/// Element orders matter, as we should release QP first and then release CQ
+pub struct WorkerContext<'a> {
+    /// Queue pairs owned by this worker
+    pub queue_pairs: Vec<GenericQueuePair<'a>>,
+    /// Completion queue wrapped in Rc<RefCell<>> for safe sharing
+    pub completion_queue: Rc<RefCell<ExtendedCompletionQueue<'a>>>,
+    /// Total number of requests this worker should process
+    pub total_requests: u32,
+    /// Number of completed requests so far
+    pub completed_requests: u32,
+    /// Number of requests currently in flight
+    pub inflight_requests: u32,
+}
+
+impl<'a> Worker<'a> {
+    /// Create a new worker with all RDMA resources
+    pub fn new(
+        device: Arc<DeviceContext>,
+        pd: Arc<ProtectionDomain<'a>>,
+        memory_region: MemoryRegion<'a>,
+        memory: Box<dyn MemoryOps>,
+        plan: Plan,
+        thread_id: usize,
+        tx_depth: u32,
+        rx_depth: Option<u32>,
+    ) -> Self {
+        info!(
+            thread_id = thread_id,
+            "Creating worker"
+        );
+
+        Self {
+            device,
+            pd,
+            memory_region,
+            additional_memory_regions: Vec::new(),
+            memory,
+            plan,
+            thread_id,
+            tx_depth,
+            rx_depth,
+        }
+    }
+
+    /// Add an additional memory region
+    pub fn add_memory_region(&mut self, mr: MemoryRegion<'a>) {
+        debug!(
+            thread_id = self.thread_id,
+            mr_count = self.additional_memory_regions.len() + 1,
+            "Adding additional memory region to worker"
+        );
+        self.additional_memory_regions.push(mr);
+    }
+
+    /// Get the primary memory region
+    pub fn primary_memory_region(&self) -> &MemoryRegion<'a> {
+        &self.memory_region
+    }
+
+    /// Get all memory regions (primary + additional)
+    pub fn all_memory_regions(&self) -> impl Iterator<Item = &MemoryRegion<'a>> {
+        std::iter::once(&self.memory_region).chain(self.additional_memory_regions.iter())
+    }
+}
+
+impl<'a> WorkerContext<'a> {
+    /// Create a new worker context using unsafe code to handle self-referential lifetimes
+    /// This follows the pattern you suggested with Rc<RefCell<>> for the completion queue
+    pub fn new(worker: &'a Worker<'a>, _plan: &Plan, total_requests: u32) -> Result<Self> {
+        info!(
+            thread_id = worker.thread_id,
+            total_requests = total_requests,
+            "Creating worker context"
+        );
+
+        // Create the completion queue using the worker's device
+        let cq = worker.device.create_cq_builder()
+            .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
+            .setup_cqe(worker.tx_depth * 2) // Extra space for safety
+            .build_ex()
+            .map_err(|e| anyhow::anyhow!("Failed to create CQ: {}", e))?;
+
+        // Wrap the CQ in Rc<RefCell<>> first
+        let cq_wrapped = Rc::new(RefCell::new(cq));
+
+        Ok(Self {
+            completion_queue: cq_wrapped,
+            queue_pairs: Vec::new(),
+            total_requests,
+            completed_requests: 0,
+            inflight_requests: 0,
+        })
+    }
+
+    /// Add a queue pair to this worker context using unsafe code for lifetime management
+    pub fn add_queue_pair(&mut self, worker: &'a Worker<'a>) -> Result<()> {
+        // Create the queue pair using the worker's protection domain
+        // We need to use unsafe to get a raw reference that lives long enough
+        let qp = unsafe {
+            let cq_ptr = self.completion_queue.as_ptr();
+            let cq_ref = &*cq_ptr;
+
+            worker.pd.create_qp_builder()
+                .setup_max_inline_data(256)
+                .setup_send_cq(cq_ref)
+                .setup_recv_cq(cq_ref)
+                .setup_max_send_wr(worker.tx_depth)
+                .setup_max_recv_wr(worker.rx_depth.unwrap_or(512))
+                .build_ex()
+                .map_err(|e| anyhow::anyhow!("Failed to create QP: {}", e))?
+                .into()
+        };
+
+        debug!(
+            thread_id = worker.thread_id,
+            qp_count = self.queue_pairs.len() + 1,
+            "Adding queue pair to worker context"
+        );
+
+        self.queue_pairs.push(qp);
+        Ok(())
+    }
+
+
+    /// Check if worker has completed all requests
+    pub fn is_complete(&self) -> bool {
+        self.completed_requests >= self.total_requests && self.inflight_requests == 0
+    }
+
+    /// Check if worker can post more requests
+    pub fn can_post_request(&self, tx_depth: u32) -> bool {
+        self.completed_requests + self.inflight_requests < self.total_requests
+            && self.inflight_requests < tx_depth
+    }
+
+    /// Record that a request was posted
+    pub fn record_request_posted(&mut self) {
+        self.inflight_requests += 1;
+        debug!(
+            inflight = self.inflight_requests,
+            completed = self.completed_requests,
+            total = self.total_requests,
+            "Request posted"
+        );
+    }
+
+    /// Record that multiple requests were posted (batch version for performance)
+    #[inline(always)]
+    pub fn record_requests_posted(&mut self, count: u32) {
+        self.inflight_requests += count;
+        debug!(
+            inflight = self.inflight_requests,
+            completed = self.completed_requests,
+            total = self.total_requests,
+            posted_count = count,
+            "Batch requests posted"
+        );
+    }
+
+    /// Record that a request was completed
+    pub fn record_request_completed(&mut self) {
+        if self.inflight_requests > 0 {
+            self.inflight_requests -= 1;
+        }
+        self.completed_requests += 1;
+        debug!(
+            inflight = self.inflight_requests,
+            completed = self.completed_requests,
+            total = self.total_requests,
+            "Request completed"
+        );
+    }
+
+    /// Get progress as a percentage
+    pub fn progress_percentage(&self) -> f64 {
+        if self.total_requests == 0 {
+            100.0
+        } else {
+            (self.completed_requests as f64 / self.total_requests as f64) * 100.0
+        }
+    }
+
+    /// Get queue pair by index (bounds-checked)
+    pub fn get_queue_pair(&self, index: usize) -> Option<&GenericQueuePair<'a>> {
+        self.queue_pairs.get(index)
+    }
+
+    /// Get mutable queue pair by index (bounds-checked)
+    pub fn get_queue_pair_mut(&mut self, index: usize) -> Option<&mut GenericQueuePair<'a>> {
+        self.queue_pairs.get_mut(index)
+    }
+
+    /// Get queue pair by index (unchecked for hot paths)
+    /// SAFETY: Caller must ensure index < queue_pair_count()
+    #[inline(always)]
+    pub unsafe fn get_queue_pair_unchecked(&self, index: usize) -> &GenericQueuePair<'a> {
+        self.queue_pairs.get_unchecked(index)
+    }
+
+    /// Get mutable queue pair by index (unchecked for hot paths)  
+    /// SAFETY: Caller must ensure index < queue_pair_count()
+    #[inline(always)]
+    pub unsafe fn get_queue_pair_mut_unchecked(&mut self, index: usize) -> &mut GenericQueuePair<'a> {
+        self.queue_pairs.get_unchecked_mut(index)
+    }
+
+    /// Get the number of queue pairs
+    pub fn queue_pair_count(&self) -> usize {
+        self.queue_pairs.len()
+    }
+
+    /// Get completion queue (for polling operations)
+    pub fn completion_queue(&self) -> &Rc<RefCell<ExtendedCompletionQueue<'a>>> {
+        &self.completion_queue
+    }
+}
+
+/// Trait for worker execution strategies
+pub trait WorkerExecutor<'a> {
+    /// Execute the worker's portion of the test
+    fn execute(&mut self, context: &mut WorkerContext<'a>) -> Result<WorkerResult>;
+}
+
+/// Result from a worker execution
+#[derive(Debug, Clone)]
+pub struct WorkerResult {
+    pub thread_id: usize,
+    pub completed_requests: u32,
+    pub total_requests: u32,
+    pub execution_time_ns: u64,
+    pub latency_samples: Vec<u64>, // For latency tests
+    pub error_count: u32,
+}
+
+impl WorkerResult {
+    pub fn new(thread_id: usize, total_requests: u32) -> Self {
+        Self {
+            thread_id,
+            completed_requests: 0,
+            total_requests,
+            execution_time_ns: 0,
+            latency_samples: Vec::new(),
+            error_count: 0,
+        }
+    }
+
+    pub fn success_rate(&self) -> f64 {
+        if self.total_requests == 0 {
+            100.0
+        } else {
+            ((self.completed_requests - self.error_count) as f64 / self.total_requests as f64) * 100.0
+        }
+    }
+}
+
+// Factory methods will be implemented later when we understand the usage patterns better
+// For now, users should create Worker instances directly using Worker::new()
+
+// Legacy function for compatibility
+use crate::runners::runner::PlanTestRunner;
 
 pub fn run_worker(plan: Plan) -> Result<()> {
     let runner = PlanTestRunner::new(plan);
