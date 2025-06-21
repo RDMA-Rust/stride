@@ -164,6 +164,15 @@ pub trait ConnectionManagerExt: ConnectionManager {
         let data = self.receive_raw()?;
         T::deserialize(&data)
     }
+
+    fn exchange_message<T: Message + DeserializeMessage>(
+        &self,
+        message_type: u32,
+        payload: &T,
+    ) -> ConnectionResult<T> {
+        self.send_message(message_type, payload)?;
+        self.receive_message()
+    }
 }
 
 impl<T: ?Sized + ConnectionManager> ConnectionManagerExt for T {}

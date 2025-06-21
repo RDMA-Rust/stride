@@ -1,19 +1,20 @@
 use serde::{Deserialize, Serialize};
 use sideway::ibverbs::address::Gid;
+use sideway::ibverbs::device::DeviceInfo;
 use sideway::ibverbs::device_context::{DeviceContext, Mtu};
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::{GenericQueuePair, QueuePair};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::connection::exchange::{MemoryRegionInfo, TestResults};
+use crate::connection::exchange::{MemoryRegionInfo, MtuNegotiationInfo, TestResults};
 use crate::connection::{
     ConnectionError, ConnectionFactory, ConnectionManager, ConnectionManagerExt, ConnectionParams,
     ConnectionResult, DestinationInfo, EndpointRole,
 };
-use crate::utils::random;
+use crate::utils::{mtu, random};
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub struct ConnectionSession<'a> {
     manager: Box<dyn ConnectionManager>,
@@ -22,6 +23,8 @@ pub struct ConnectionSession<'a> {
     local_gid_index: u8,
     local_gid: Option<Gid>,
     remote_gid: Option<Gid>,
+    requested_mtu: Mtu,
+    negotiated_mtu: Option<Mtu>,
 }
 
 impl<'a> ConnectionSession<'a> {
@@ -31,6 +34,7 @@ impl<'a> ConnectionSession<'a> {
         pd: Arc<ProtectionDomain<'a>>,
         params: ConnectionParams,
         gid_index: u8,
+        requested_mtu: Mtu,
     ) -> ConnectionResult<Self> {
         let manager = ConnectionFactory::create(conn_type, params)?;
 
@@ -41,6 +45,8 @@ impl<'a> ConnectionSession<'a> {
             local_gid_index: gid_index,
             local_gid: None,
             remote_gid: None,
+            requested_mtu,
+            negotiated_mtu: None,
         })
     }
 
@@ -109,8 +115,12 @@ impl<'a> ConnectionSession<'a> {
         &mut self,
         qp: &mut GenericQueuePair<'_>,
     ) -> ConnectionResult<DestinationInfo> {
-        // Prepare local QP data
-        let local_data = self.prepare_local_qp_data(qp)?;
+        // Perform MTU negotiation first
+        let negotiated_mtu = self.negotiate_mtu()?;
+        self.negotiated_mtu = Some(negotiated_mtu);
+
+        // Prepare local QP data with negotiated MTU
+        let local_data = self.prepare_local_qp_data(qp, negotiated_mtu)?;
         self.local_gid = Some(local_data.gid);
 
         // Setup QP with remote data
@@ -118,6 +128,59 @@ impl<'a> ConnectionSession<'a> {
         self.remote_gid = Some(remote_data.gid);
 
         Ok(remote_data)
+    }
+
+    fn negotiate_mtu(&self) -> ConnectionResult<Mtu> {
+        // Query local port MTU capabilities and validate user selection
+        let port_num = 1; // Typically port 1, could be configurable in the future
+        let local_max_mtu = mtu::query_port_max_mtu(&self.ctx, port_num).map_err(|e| {
+            ConnectionError::RdmaError(format!("Failed to query port MTU: {:?}", e))
+        })?;
+
+        // Validate user-requested MTU against local device capabilities
+        let (local_validated_mtu, was_downgraded) = mtu::negotiate_mtu(
+            self.requested_mtu,
+            local_max_mtu,
+            &self.ctx.name(),
+            port_num,
+        );
+
+        // Create local MTU info with validated MTU
+        let local_mtu_info = MtuNegotiationInfo::new(local_validated_mtu);
+
+        // Exchange validated MTU information with remote peer
+        let remote_mtu_info: MtuNegotiationInfo = self
+            .manager
+            .exchange_message(3, &local_mtu_info)
+            .map_err(|e| {
+                ConnectionError::ExchangeFailed(format!("MTU negotiation failed: {:?}", e))
+            })?;
+
+        // Final negotiated MTU is the minimum of both validated MTUs
+        let local_mtu_value = mtu::mtu_to_value(local_validated_mtu);
+        let remote_mtu_value = mtu::mtu_to_value(remote_mtu_info.validated_mtu);
+        let final_mtu_value = local_mtu_value.min(remote_mtu_value);
+        let final_mtu = mtu::value_to_mtu(final_mtu_value);
+
+        // Log the negotiation result
+        if was_downgraded || final_mtu_value < local_mtu_value {
+            warn!(
+                device = self.ctx.name(),
+                requested = ?self.requested_mtu,
+                local_validated = ?local_validated_mtu,
+                remote_validated = ?remote_mtu_info.validated_mtu,
+                final_negotiated = ?final_mtu,
+                "MTU negotiation completed with downgrade"
+            );
+        } else {
+            info!(
+                device = self.ctx.name(),
+                negotiated = ?final_mtu,
+                "MTU negotiation completed successfully"
+            );
+        }
+
+        Ok(final_mtu)
     }
 
     pub fn synchronize_qps(&self) -> ConnectionResult<()> {
@@ -206,6 +269,7 @@ impl<'a> ConnectionSession<'a> {
     fn prepare_local_qp_data(
         &self,
         qp: &GenericQueuePair<'_>,
+        negotiated_mtu: Mtu,
     ) -> ConnectionResult<DestinationInfo> {
         // Get local GID information
         let gid = self
@@ -223,11 +287,16 @@ impl<'a> ConnectionSession<'a> {
             gid_type: gid.gid_type(),
             gid_index: self.local_gid_index,
             psn,
-            mtu: Mtu::Mtu4096,
+            mtu: negotiated_mtu,
         })
     }
 
     pub fn close(&mut self) -> ConnectionResult<()> {
         self.manager.close()
+    }
+
+    /// Get the negotiated MTU (available after setup_queue_pair is called)
+    pub fn negotiated_mtu(&self) -> Option<Mtu> {
+        self.negotiated_mtu
     }
 }

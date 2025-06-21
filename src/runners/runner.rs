@@ -132,8 +132,14 @@ impl PlanTestRunner {
         let timeout_factor = self.plan.base().timeout;
         conn_params.timeout = Duration::from_micros(4 * (1u64 << timeout_factor));
 
-        let mut session =
-            ConnectionSession::new("tcp", ctx.clone(), pd.clone(), conn_params, gid_index)?;
+        let mut session = ConnectionSession::new(
+            "tcp",
+            ctx.clone(),
+            pd.clone(),
+            conn_params,
+            gid_index,
+            self.plan.mtu(),
+        )?;
 
         // Initialize the connection session
         let _ = session.initialize();
@@ -141,7 +147,6 @@ impl PlanTestRunner {
         // Establish connection
         let address = &self.plan.base().addr;
         session.establish_connection(address)?;
-        let actual_mtu = 4096;
 
         let gid_entry = ctx.query_gid_ex(1, gid_index as u32)?;
         let gid_type = gid_entry.gid_type();
@@ -150,6 +155,7 @@ impl PlanTestRunner {
 
         // Setup each queue pair
         debug!("Setting up {} queue pairs", qps.len());
+        let mut actual_mtu = 4096; // default fallback
         for (i, (qp, detail)) in qps.iter_mut().zip(qp_details.iter_mut()).enumerate() {
             // Store local PSN before exchange
             let local_psn = detail.local_psn;
@@ -157,6 +163,13 @@ impl PlanTestRunner {
             // Setup the QP
             let remote_data = session.setup_queue_pair(qp)?;
             remote_gid = remote_data.gid;
+
+            // Get negotiated MTU after first QP setup
+            if i == 0 {
+                if let Some(negotiated) = session.negotiated_mtu() {
+                    actual_mtu = crate::utils::mtu::mtu_to_value(negotiated);
+                }
+            }
 
             // Update QP details with actual exchanged values
             detail.local_qpn = qp.qp_number();

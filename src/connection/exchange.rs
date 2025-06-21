@@ -16,6 +16,17 @@ pub struct DestinationInfo {
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+pub struct MtuNegotiationInfo {
+    pub validated_mtu: Mtu,
+}
+
+impl MtuNegotiationInfo {
+    pub fn new(validated_mtu: Mtu) -> Self {
+        Self { validated_mtu }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug)]
 pub struct MemoryRegionInfo {
     pub addr: u64,   // Remote memory base address
     pub rkey: u32,   // Remote key for accessing the memory

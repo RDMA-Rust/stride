@@ -5,7 +5,7 @@ use tracing_subscriber::filter::LevelFilter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = ProbeCli::parse();
-    
+
     // Configure tracing based on CLI flags
     if cli.trace {
         tracing_subscriber::fmt()

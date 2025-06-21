@@ -1,4 +1,5 @@
 use crate::connection::exchange::MemoryRegionInfo;
+use sideway::ibverbs::device_context::Mtu;
 
 #[derive(Debug, Clone)]
 pub struct OutputConfig {
@@ -31,6 +32,7 @@ pub struct PlanBase {
     pub post_list: u32,
     pub cqe_poll: u32,
     pub hugepages: bool,
+    pub mtu: Mtu,
     pub output: OutputConfig,
 }
 
@@ -156,6 +158,11 @@ impl Plan {
             Plan::Write(p) => p.remote_mr = Some(remote_mr),
             Plan::Read(p) => p.remote_mr = Some(remote_mr),
         }
+    }
+
+    /// Get the configured MTU for this plan
+    pub fn mtu(&self) -> Mtu {
+        self.base().mtu
     }
 }
 

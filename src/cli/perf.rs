@@ -1,7 +1,41 @@
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use sideway::ibverbs::device_context::Mtu;
 
-use crate::cli::plan::{Mode, Operation, OutputConfig, Plan, PlanBase, ReadPlan, SendPlan, WritePlan};
+use crate::cli::plan::{
+    Mode, Operation, OutputConfig, Plan, PlanBase, ReadPlan, SendPlan, WritePlan,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub struct PathMtu(pub Mtu);
+
+impl ValueEnum for PathMtu {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            Self(Mtu::Mtu256),
+            Self(Mtu::Mtu512),
+            Self(Mtu::Mtu1024),
+            Self(Mtu::Mtu2048),
+            Self(Mtu::Mtu4096),
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        match self.0 {
+            Mtu::Mtu256 => Some(clap::builder::PossibleValue::new("256")),
+            Mtu::Mtu512 => Some(clap::builder::PossibleValue::new("512")),
+            Mtu::Mtu1024 => Some(clap::builder::PossibleValue::new("1024")),
+            Mtu::Mtu2048 => Some(clap::builder::PossibleValue::new("2048")),
+            Mtu::Mtu4096 => Some(clap::builder::PossibleValue::new("4096")),
+        }
+    }
+}
+
+impl Default for PathMtu {
+    fn default() -> Self {
+        Self(Mtu::Mtu4096)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "stride-perf")]
@@ -135,6 +169,9 @@ pub struct CommonOpts {
     /// Use hugepages for memory allocations
     #[arg(long)]
     pub use_hugepages: bool,
+    /// MTU size (Byte)
+    #[arg(long, short = 'm', value_enum, default_value_t = PathMtu::default())]
+    pub mtu: PathMtu,
 }
 
 impl TryFrom<Cli> for Plan {
@@ -244,6 +281,7 @@ impl TryFrom<Cli> for Plan {
             post_list: common.post_list,
             cqe_poll: common.cqe_poll,
             hugepages: common.use_hugepages,
+            mtu: common.mtu.0,
             output,
         };
 
