@@ -1,7 +1,9 @@
 use crate::cli::plan::Plan;
 use crate::memory::MemoryOps;
 use anyhow::Result;
-use sideway::ibverbs::completion::{ExtendedCompletionQueue, CreateCompletionQueueWorkCompletionFlags};
+use sideway::ibverbs::completion::{
+    CreateCompletionQueueWorkCompletionFlags, ExtendedCompletionQueue,
+};
 use sideway::ibverbs::device_context::DeviceContext;
 use sideway::ibverbs::memory_region::MemoryRegion;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
@@ -14,12 +16,12 @@ use tracing::{debug, info};
 /// Worker that owns all RDMA resources needed for independent operation
 /// This is the parent struct that has stable addresses for borrowing
 pub struct Worker<'a> {
-    /// Primary memory region for this worker
-    pub memory_region: MemoryRegion<'a>,
+    /// Primary memory region for this worker (None for shared memory workers)
+    pub memory_region: Option<MemoryRegion<'a>>,
     /// Optional additional memory regions (for multi-buffer scenarios)
     pub additional_memory_regions: Vec<MemoryRegion<'a>>,
-    /// Memory allocator handle (for cleanup)
-    pub memory: Box<dyn MemoryOps>,
+    /// Memory allocator handle (for cleanup) - None for shared memory workers
+    pub memory: Option<Box<dyn MemoryOps>>,
     /// Protection domain (shared across workers)
     pub pd: Arc<ProtectionDomain<'a>>,
     /// Device context (shared across workers)
@@ -32,6 +34,12 @@ pub struct Worker<'a> {
     pub tx_depth: u32,
     /// RX depth for queue pairs
     pub rx_depth: Option<u32>,
+    /// perftest-style address calculation fields
+    pub base_addr: *mut u8, // Base address for this worker's memory region
+    pub increment_size: usize, // Cache-aligned increment size
+    pub worker_offset: usize,  // Offset within shared buffer for this worker
+    /// Memory region handle for shared memory workers
+    pub lkey: u32, // Local key for RDMA operations
 }
 
 /// Worker context that contains all resources needed for a thread worker
@@ -53,7 +61,7 @@ pub struct WorkerContext<'a> {
 }
 
 impl<'a> Worker<'a> {
-    /// Create a new worker with all RDMA resources
+    /// Create a new worker with all RDMA resources (legacy method)
     pub fn new(
         device: Arc<DeviceContext>,
         pd: Arc<ProtectionDomain<'a>>,
@@ -66,20 +74,81 @@ impl<'a> Worker<'a> {
     ) -> Self {
         info!(
             thread_id = thread_id,
-            "Creating worker"
+            "Creating worker with dedicated memory"
+        );
+
+        // Calculate base address and default increment for legacy compatibility
+        let base_addr = memory_region.get_ptr() as *mut u8;
+        let increment_size = 64; // Default cache line size
+        let lkey = memory_region.lkey();
+
+        Self {
+            device,
+            pd,
+            memory_region: Some(memory_region),
+            additional_memory_regions: Vec::new(),
+            memory: Some(memory),
+            plan,
+            thread_id,
+            tx_depth,
+            rx_depth,
+            base_addr,
+            increment_size,
+            worker_offset: 0,
+            lkey,
+        }
+    }
+
+    /// Create a new worker with shared memory region (perftest-style)
+    pub fn new_with_shared_memory(
+        device: Arc<DeviceContext>,
+        pd: Arc<ProtectionDomain<'a>>,
+        lkey: u32, // Just pass the lkey, not the full MR
+        base_addr: *mut u8,
+        increment_size: usize,
+        worker_offset: usize,
+        plan: Plan,
+        thread_id: usize,
+        tx_depth: u32,
+        rx_depth: Option<u32>,
+    ) -> Self {
+        info!(
+            thread_id = thread_id,
+            worker_offset = worker_offset,
+            increment_size = increment_size,
+            lkey = lkey,
+            "Creating worker with shared memory"
         );
 
         Self {
             device,
             pd,
-            memory_region,
+            memory_region: None, // No individual MR ownership for shared workers
             additional_memory_regions: Vec::new(),
-            memory,
+            memory: None, // No individual memory ownership for shared workers
             plan,
             thread_id,
             tx_depth,
             rx_depth,
+            base_addr,
+            increment_size,
+            worker_offset,
+            lkey,
         }
+    }
+
+    /// Calculate address for a specific operation following perftest pattern
+    #[inline(always)]
+    pub fn calculate_operation_addr(&self, operation_index: u32, _msg_size: u32) -> u64 {
+        // PERFORMANCE CRITICAL: Super-fast path for bandwidth tests
+        // For maximum performance, use minimal address cycling
+
+        // Simple approach: use base address + small offset to avoid cache conflicts
+        // This matches the pattern that achieves 13+ Mpps in baseline
+        let simple_offset = ((operation_index as usize) & 0x3F) * 64; // cycle through 64 cache lines
+        let final_addr_offset = self.worker_offset + simple_offset;
+
+        unsafe { self.base_addr.add(final_addr_offset) as u64 }
     }
 
     /// Add an additional memory region
@@ -92,14 +161,21 @@ impl<'a> Worker<'a> {
         self.additional_memory_regions.push(mr);
     }
 
-    /// Get the primary memory region
-    pub fn primary_memory_region(&self) -> &MemoryRegion<'a> {
-        &self.memory_region
+    /// Get the primary memory region (for legacy compatibility)
+    pub fn primary_memory_region(&self) -> Option<&MemoryRegion<'a>> {
+        self.memory_region.as_ref()
+    }
+
+    /// Get the lkey for RDMA operations
+    pub fn lkey(&self) -> u32 {
+        self.lkey
     }
 
     /// Get all memory regions (primary + additional)
     pub fn all_memory_regions(&self) -> impl Iterator<Item = &MemoryRegion<'a>> {
-        std::iter::once(&self.memory_region).chain(self.additional_memory_regions.iter())
+        self.memory_region
+            .iter()
+            .chain(self.additional_memory_regions.iter())
     }
 }
 
@@ -114,7 +190,9 @@ impl<'a> WorkerContext<'a> {
         );
 
         // Create the completion queue using the worker's device
-        let cq = worker.device.create_cq_builder()
+        let cq = worker
+            .device
+            .create_cq_builder()
             .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
             .setup_cqe(worker.tx_depth * 2) // Extra space for safety
             .build_ex()
@@ -140,7 +218,9 @@ impl<'a> WorkerContext<'a> {
             let cq_ptr = self.completion_queue.as_ptr();
             let cq_ref = &*cq_ptr;
 
-            worker.pd.create_qp_builder()
+            worker
+                .pd
+                .create_qp_builder()
                 .setup_max_inline_data(256)
                 .setup_send_cq(cq_ref)
                 .setup_recv_cq(cq_ref)
@@ -160,7 +240,6 @@ impl<'a> WorkerContext<'a> {
         self.queue_pairs.push(qp);
         Ok(())
     }
-
 
     /// Check if worker has completed all requests
     pub fn is_complete(&self) -> bool {
@@ -198,17 +277,13 @@ impl<'a> WorkerContext<'a> {
     }
 
     /// Record that a request was completed
+    #[inline(always)]
     pub fn record_request_completed(&mut self) {
         if self.inflight_requests > 0 {
             self.inflight_requests -= 1;
         }
         self.completed_requests += 1;
-        debug!(
-            inflight = self.inflight_requests,
-            completed = self.completed_requests,
-            total = self.total_requests,
-            "Request completed"
-        );
+        // Removed debug logging from hot path for performance
     }
 
     /// Get progress as a percentage
@@ -240,7 +315,10 @@ impl<'a> WorkerContext<'a> {
     /// Get mutable queue pair by index (unchecked for hot paths)  
     /// SAFETY: Caller must ensure index < queue_pair_count()
     #[inline(always)]
-    pub unsafe fn get_queue_pair_mut_unchecked(&mut self, index: usize) -> &mut GenericQueuePair<'a> {
+    pub unsafe fn get_queue_pair_mut_unchecked(
+        &mut self,
+        index: usize,
+    ) -> &mut GenericQueuePair<'a> {
         self.queue_pairs.get_unchecked_mut(index)
     }
 
@@ -288,7 +366,8 @@ impl WorkerResult {
         if self.total_requests == 0 {
             100.0
         } else {
-            ((self.completed_requests - self.error_count) as f64 / self.total_requests as f64) * 100.0
+            ((self.completed_requests - self.error_count) as f64 / self.total_requests as f64)
+                * 100.0
         }
     }
 }

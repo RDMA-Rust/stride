@@ -56,4 +56,13 @@ pub struct ConnectionSetupResult {
     pub local_gid: Gid,
     pub remote_gid: Gid,
     pub actual_mtu: u32,
+    pub qp_details: Vec<QueuePairConnection>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueuePairConnection {
+    pub local_qpn: u32,
+    pub local_psn: u32,
+    pub remote_qpn: u32,
+    pub remote_psn: u32,
 }

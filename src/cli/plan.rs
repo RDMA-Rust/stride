@@ -123,8 +123,12 @@ impl Plan {
     pub fn rx_depth(&self) -> Option<u32> {
         match self {
             Plan::Send(p) => Some(p.rx_depth),
-            _ => None, // WRITE and READ don't need rx_depth
+            _ => None, // WRITE and read don't need rx_depth
         }
+    }
+
+    pub fn is_bidirectional(&self) -> bool {
+        self.base().bidir
     }
 
     pub fn uses_immediate_data(&self) -> bool {

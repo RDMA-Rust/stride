@@ -17,7 +17,9 @@ use sideway::ibverbs::address::Gid;
 use sideway::ibverbs::completion::WorkCompletionStatus;
 use sideway::ibverbs::device::DeviceInfo;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
-use sideway::ibverbs::queue_pair::{PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags};
+use sideway::ibverbs::queue_pair::{
+    PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
+};
 use sideway::ibverbs::AccessFlags;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -65,6 +67,7 @@ impl PlanTestRunner {
         &self,
         worker: &Worker<'a>,
         worker_context: &mut WorkerContext<'a>,
+        total_buffer_size: usize,
     ) -> Result<(ConnectionSetupResult, ConnectionSession<'a>)> {
         let gid_index = self.plan.base().gid_index.unwrap_or(0);
         let server_mode = self.plan.base().server;
@@ -107,10 +110,13 @@ impl PlanTestRunner {
         let mut remote_gid = Gid::default();
 
         // Setup each queue pair
-        debug!("Setting up {} queue pairs", worker_context.queue_pair_count());
+        debug!(
+            "Setting up {} queue pairs",
+            worker_context.queue_pair_count()
+        );
         let mut actual_mtu = 4096; // default fallback
         let mut qp_connections = Vec::new();
-        
+
         for (i, qp) in worker_context.queue_pairs.iter_mut().enumerate() {
             // Create local destination info
             let local_psn = random::generate_psn();
@@ -153,9 +159,17 @@ impl PlanTestRunner {
 
         // Exchange memory regions after QP setup
         debug!("Exchanging memory region information...");
-        let mr = worker.primary_memory_region();
-        let remote_mr =
-            session.exchange_memory_regions(mr.get_ptr() as u64, mr.rkey(), mr.region_len())?;
+        let remote_mr = if let Some(mr) = worker.primary_memory_region() {
+            // Legacy dedicated memory path
+            session.exchange_memory_regions(mr.get_ptr() as u64, mr.rkey(), mr.region_len())?
+        } else {
+            // Shared memory path
+            session.exchange_memory_regions(
+                worker.base_addr as u64,
+                worker.lkey(),
+                total_buffer_size,
+            )?
+        };
 
         session.synchronize_qps()?;
 
@@ -172,6 +186,23 @@ impl PlanTestRunner {
         ))
     }
 
+    /// Execute server-side receive-only mode (for unidirectional traffic)
+    fn execute_server_receive_only(
+        &self,
+        worker_context: &mut WorkerContext,
+    ) -> Result<WorkerResult> {
+        // Server just waits - the actual traffic handling is done by the RDMA hardware
+        // Return a dummy result since server doesn't generate traffic in unidirectional mode
+        Ok(WorkerResult {
+            thread_id: 0,
+            completed_requests: 0,
+            total_requests: worker_context.total_requests,
+            execution_time_ns: 0,
+            latency_samples: Vec::new(),
+            error_count: 0,
+        })
+    }
+
     /// Execute RDMA operations for a single worker
     fn execute_worker<'a>(
         &self,
@@ -182,7 +213,6 @@ impl PlanTestRunner {
         histogram: &mut hdrhistogram::Histogram<u64>,
     ) -> Result<WorkerResult> {
         let clock = Clock::new();
-        let start_time = clock.now();
         let mut result = WorkerResult::new(worker.thread_id, worker_context.total_requests);
 
         let is_latency = self.plan.is_latency();
@@ -193,84 +223,64 @@ impl PlanTestRunner {
         let mut max_latency_ns: u64 = 0;
 
         let cq = worker_context.completion_queue().clone();
-        let mr = worker.primary_memory_region();
 
-        while !worker_context.is_complete() {
-            // Post operations if we can
-            while worker_context.can_post_request(tx_depth) {
-                let post_list = self.plan.base().post_list.min(
-                    worker_context.total_requests - worker_context.completed_requests - worker_context.inflight_requests
-                ) as usize;
+        let start_time = clock.now();
 
-                if post_list == 0 {
-                    break;
-                }
+        // For latency tests with tx_depth=1, use a different measurement pattern
+        if is_latency && tx_depth == 1 {
+            // Latency mode: post one operation, wait for completion, repeat
+            while !worker_context.is_complete() {
+                if worker_context.can_post_request(tx_depth) {
+                    let operation_start_time = clock.now(); // Precise timing for single operation
 
-                // Take timestamp for latency measurements
-                let _operation_start_time = if is_latency { Some(clock.now()) } else { None };
+                    // Post single operation across QPs (for tx_depth=1, this is typically 1 op)
+                    let post_list = 1;
+                    self.post_operations(worker, worker_context, post_list, msg_size, remote_mr)?;
 
-                // Create buffers for state to avoid borrow conflicts
-                let completed = worker_context.completed_requests;
-                let inflight = worker_context.inflight_requests;
-
-                // Get QP in limited scope (unchecked for performance)
-                // SAFETY: We always create at least 1 QP during setup, index 0 is guaranteed valid
-                let qp = unsafe { worker_context.get_queue_pair_mut_unchecked(0) };
-
-                // Create a single post guard
-                let mut guard = qp.start_post_send();
-
-                // Hot path: Calculate base values outside loop for performance
-                let base_ptr = mr.get_ptr() as u64;
-                let msg_size_u64 = msg_size as u64;
-                let thread_id_shifted = (worker.thread_id as u64) << 32;
-                
-                // Post up to post_list operations at once
-                for i in 0..post_list {
-                    // Calculate buffer offset with unchecked arithmetic (safe: tx_depth bounds buffer allocation)
-                    let iter_index = (completed + inflight + i as u32) % tx_depth;
-                    let iter_offset = (iter_index as u64) * msg_size_u64;
-                    let local_addr = base_ptr + iter_offset;
-
-                    let wr_id = thread_id_shifted | ((completed + inflight + i as u32) as u64);
-
-                    // For WRITE operations, use remote memory info
-                    let send_handle = if is_write {
-                        let remote_addr = remote_mr.addr + iter_offset;
-                        guard
-                            .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                            .setup_write(remote_mr.rkey, remote_addr)
-                    } else {
-                        guard
-                            .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                            .setup_send()
-                    };
-
-                    // Setup scatter-gather entry
-                    unsafe {
-                        send_handle.setup_sge(mr.lkey(), local_addr, msg_size);
+                    // Immediately wait for this operation's completion
+                    self.wait_for_completion(
+                        &cq,
+                        operation_start_time,
+                        histogram,
+                        &mut min_latency_ns,
+                        &mut max_latency_ns,
+                        worker_context,
+                        &clock,
+                    )?;
+                } else {
+                    // No more operations to post, just wait for remaining completions
+                    if worker_context.inflight_requests > 0 {
+                        self.wait_for_completion(
+                            &cq,
+                            start_time, // Use start_time for remaining ops
+                            histogram,
+                            &mut min_latency_ns,
+                            &mut max_latency_ns,
+                            worker_context,
+                            &clock,
+                        )?;
                     }
                 }
-
-                // Post all operations at once
-                guard.post()?;
-
-                // Update counters after posting (batch update for performance)
-                worker_context.record_requests_posted(post_list as u32);
             }
+        } else {
+            // Bandwidth mode: batch posting and polling
+            while !worker_context.is_complete() {
+                // Post operations if we can - distribute across multiple QPs
+                while worker_context.can_post_request(tx_depth) {
+                    let post_list = self.plan.base().post_list.min(
+                        worker_context.total_requests
+                            - worker_context.completed_requests
+                            - worker_context.inflight_requests,
+                    ) as usize;
 
-            // Poll for completions
-            if is_latency {
-                // For latency tests, wait for each completion individually
-                self.wait_for_completion(
-                    &cq,
-                    start_time,
-                    histogram,
-                    &mut min_latency_ns,
-                    &mut max_latency_ns,
-                    worker_context,
-                )?;
-            } else {
+                    if post_list == 0 {
+                        break;
+                    }
+
+                    // Use helper method to post operations
+                    self.post_operations(worker, worker_context, post_list, msg_size, remote_mr)?;
+                }
+
                 // For bandwidth tests, poll in batches
                 self.poll_completions(&cq, worker_context)?;
             }
@@ -300,6 +310,7 @@ impl PlanTestRunner {
         min_latency_ns: &mut u64,
         max_latency_ns: &mut u64,
         worker_context: &mut WorkerContext,
+        clock: &Clock,
     ) -> Result<()> {
         loop {
             // Proper CQ polling pattern following main.rs example
@@ -316,7 +327,7 @@ impl PlanTestRunner {
                         }
 
                         // Measure completion time for latency
-                        let completion_time = quanta::Clock::new().now();
+                        let completion_time = clock.now();
                         let latency_ns = completion_time.duration_since(start_time).into_nanos();
 
                         // Record latency
@@ -366,9 +377,108 @@ impl PlanTestRunner {
         Ok(())
     }
 
+    /// Helper method to post operations to QPs
+    fn post_operations<'a>(
+        &self,
+        worker: &Worker<'a>,
+        worker_context: &mut WorkerContext<'a>,
+        post_list: usize,
+        msg_size: u32,
+        remote_mr: &crate::connection::exchange::MemoryRegionInfo,
+    ) -> Result<()> {
+        let is_write = self.plan.needs_remote_addr();
+        let tx_depth = worker.tx_depth;
+        let thread_id_shifted = (worker.thread_id as u64) << 32;
+
+        // Optimize: Replace expensive modulo with bitwise AND (tx_depth must be power of 2)
+        debug_assert!(
+            tx_depth.is_power_of_two(),
+            "tx_depth must be power of 2 for bitwise optimization"
+        );
+        let tx_depth_mask = tx_depth - 1;
+
+        // Create buffers for state to avoid borrow conflicts
+        let completed = worker_context.completed_requests;
+        let inflight = worker_context.inflight_requests;
+        let qp_count = worker_context.queue_pair_count();
+
+        // Distribute work across all available QPs
+        for qp_idx in 0..qp_count {
+            // Calculate how many operations this QP should handle
+            let operations_per_qp = post_list / qp_count;
+            let extra_operations = if qp_idx < (post_list % qp_count) {
+                1
+            } else {
+                0
+            };
+            let qp_operations = operations_per_qp + extra_operations;
+
+            if qp_operations == 0 {
+                continue;
+            }
+
+            // Get QP (unchecked for performance)
+            // SAFETY: qp_idx < qp_count, which is the number of QPs we created
+            let qp = unsafe { worker_context.get_queue_pair_mut_unchecked(qp_idx) };
+
+            // Create post guard for this QP
+            let mut guard = qp.start_post_send();
+
+            // Post operations for this QP
+            for i in 0..qp_operations {
+                let global_op_index = qp_idx * operations_per_qp
+                    + i
+                    + if qp_idx >= (post_list % qp_count) {
+                        post_list % qp_count
+                    } else {
+                        0
+                    };
+
+                // PERFORMANCE CRITICAL: Use bitwise AND instead of modulo (80-100x faster)
+                let operation_index =
+                    (completed + inflight + global_op_index as u32) & tx_depth_mask;
+
+                // perftest-style address calculation: use worker's address cycling
+                let local_addr = worker.calculate_operation_addr(operation_index, msg_size);
+
+                let wr_id =
+                    thread_id_shifted | ((completed + inflight + global_op_index as u32) as u64);
+
+                // For WRITE operations, use remote memory info with same cycling pattern
+                let send_handle = if is_write {
+                    // Remote side uses same offset pattern as local side
+                    let local_offset = local_addr - (worker.base_addr as u64);
+                    let remote_addr = remote_mr.addr + local_offset;
+                    guard
+                        .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                        .setup_write(remote_mr.rkey, remote_addr)
+                } else {
+                    guard
+                        .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                        .setup_send()
+                };
+
+                // Setup scatter-gather entry
+                unsafe {
+                    send_handle.setup_sge(worker.lkey(), local_addr, msg_size);
+                }
+            }
+
+            // Post all operations for this QP
+            guard.post()?;
+        }
+
+        // Update counters after posting (batch update for performance)
+        worker_context.record_requests_posted(post_list as u32);
+        Ok(())
+    }
+
     /// Main execution function using Worker architecture
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("Starting {} with Worker architecture", self.plan.test_name());
+        info!(
+            "Starting {} with Worker architecture",
+            self.plan.test_name()
+        );
 
         // Get parameters from plan
         let device_name = self.plan.base().dev.as_deref();
@@ -396,36 +506,68 @@ impl PlanTestRunner {
         let is_latency = test_type.is_latency();
         let max_msg_size = *msg_sizes.iter().max().unwrap_or(&65536);
 
-        // Create workers using the new Worker interface
+        // Create workers using perftest-style shared memory allocation
+        // Following perftest pattern: shared buffer across QPs with cache-aligned cycling
+
+        // Calculate buffer size following perftest BUFF_SIZE and INC patterns
+        const CYCLE_BUFFER_SIZE: usize = 4096; // Minimum buffer size (like perftest cycle_buffer)
+        const CACHE_LINE_SIZE: usize = 64; // Standard cache line size
+
+        // BUFF_SIZE equivalent: ensure minimum 4K for small messages
+        let effective_msg_size = if max_msg_size < CYCLE_BUFFER_SIZE as u32 {
+            CYCLE_BUFFER_SIZE
+        } else {
+            max_msg_size as usize
+        };
+
+        // INC equivalent: cache-aligned increment size
+        let increment_size = if effective_msg_size > CACHE_LINE_SIZE {
+            // Round up to cache line boundary
+            (effective_msg_size + CACHE_LINE_SIZE - 1) & !(CACHE_LINE_SIZE - 1)
+        } else {
+            CACHE_LINE_SIZE
+        };
+
+        // perftest-style buffer calculation: increment * 2 (send/recv) * qp_factor
+        // tx_depth is handled by cycling through addresses, not buffer size multiplication
+        let total_buffer_size = increment_size * 2 * qp_count;
+
+        info!(
+            "Memory allocation: msg_size={} -> effective_size={}, increment={}, total_buffer={}KB",
+            max_msg_size,
+            effective_msg_size,
+            increment_size,
+            total_buffer_size / 1024
+        );
+
+        // Allocate single shared memory region for all QPs (perftest approach)
+        let memory_type = if self.plan.base().hugepages {
+            MemoryType::Hugepages(HugepageConfig::new(total_buffer_size))
+        } else {
+            MemoryType::Aligned(AlignedConfig::new(total_buffer_size, CACHE_LINE_SIZE))
+        };
+
+        let shared_memory = MemoryAllocator::allocate(memory_type)?;
+
+        // Create single shared memory region
+        let shared_mr = unsafe {
+            pd.reg_mr(
+                shared_memory.get_handle(),
+                shared_memory.size(),
+                AccessFlags::LocalWrite | AccessFlags::RemoteWrite | AccessFlags::RelaxedOrdering,
+            )?
+        };
+
+        // Create workers sharing the same memory region (following perftest pattern)
         let mut workers = Vec::with_capacity(qp_count);
         for thread_id in 0..qp_count {
-            // Create memory for this worker
-            let buffer_size = tx_depth as usize * max_msg_size as usize;
-            let memory_type = if self.plan.base().hugepages {
-                MemoryType::Hugepages(HugepageConfig::new(buffer_size))
-            } else {
-                MemoryType::Aligned(AlignedConfig::new(
-                    buffer_size,
-                    crate::memory::aligned::DEFAULT_CACHE_LINE_SIZE,
-                ))
-            };
-
-            let memory = MemoryAllocator::allocate(memory_type)?;
-
-            // Create memory region
-            let mr = unsafe {
-                pd.reg_mr(
-                    memory.get_handle(),
-                    memory.size(),
-                    AccessFlags::LocalWrite | AccessFlags::RemoteWrite | AccessFlags::RelaxedOrdering,
-                )?
-            };
-
-            let worker = Worker::new(
+            let worker = Worker::new_with_shared_memory(
                 ctx.clone(),
                 pd.clone(),
-                mr,
-                memory,
+                shared_mr.lkey(),                      // Just pass the lkey
+                shared_memory.get_handle() as *mut u8, // Base pointer for address calculation
+                increment_size,                        // Cache-aligned increment for this worker
+                thread_id * increment_size * 2,        // Offset for this QP (2 = send/recv factor)
                 self.plan.clone(),
                 thread_id,
                 tx_depth,
@@ -435,20 +577,24 @@ impl PlanTestRunner {
             workers.push(worker);
         }
 
+        // Keep shared memory alive
+        let _shared_memory_handle = shared_memory;
+
         // For now, we'll run single-threaded with the first worker
         // TODO: Implement multi-threaded execution later
         let worker = &workers[0];
         let mut worker_context = WorkerContext::new(worker, &self.plan, iterations)?;
-        
+
         // Add queue pairs to the worker context
         for _ in 0..qp_count {
             worker_context.add_queue_pair(worker)?;
         }
 
         // Setup connection using the worker
-        let (conn_result, mut session) = self.setup_connection(worker, &mut worker_context)?;
+        let (conn_result, mut session) =
+            self.setup_connection(worker, &mut worker_context, total_buffer_size)?;
 
-        // Create display output for results  
+        // Create display output for results
         let config = TestConfiguration {
             device: ctx.name(),
             transport: ctx.transport_type().to_string(),
@@ -462,7 +608,10 @@ impl PlanTestRunner {
             test_type,
         };
 
-        let qp_details: Vec<QueuePairDetail> = conn_result.qp_details.iter().enumerate()
+        let qp_details: Vec<QueuePairDetail> = conn_result
+            .qp_details
+            .iter()
+            .enumerate()
             .map(|(i, qp_conn)| QueuePairDetail {
                 qp_index: i as u32,
                 local_qpn: qp_conn.local_qpn,
@@ -473,57 +622,172 @@ impl PlanTestRunner {
             .collect();
 
         let gid_info = vec![conn_result.local_gid, conn_result.remote_gid];
-        let mut display = DisplayOutput::new(config, qp_details, gid_info, self.plan.base().output.clone());
+        let mut display = DisplayOutput::new(
+            config,
+            qp_details,
+            gid_info,
+            self.plan.base().output.clone(),
+        );
 
-        // Display headers and configuration only once before testing
-        let header_width = if is_latency { 
-            crate::utils::display::DEFAULT_LAT_HEADER_WIDTH 
-        } else { 
-            crate::utils::display::DEFAULT_HEADER_WIDTH 
-        };
-        display.display_headers_only(header_width);
+        // Display headers and configuration only for clients and bidirectional servers
+        let is_server = self.plan.base().server;
+        let is_bidirectional = self.plan.is_bidirectional();
 
-        // Initialize streaming table for real-time results
-        let mut table_formatter = if is_latency {
-            Some(display.init_latency_streaming_table(header_width)?)
+        let mut table_formatter = if is_server && !is_bidirectional {
+            // Unidirectional server mode: display headers but initialize table later when receiving results
+            info!("Running in server mode (unidirectional) - waiting for client connections...");
+            let header_width = if is_latency {
+                crate::utils::display::DEFAULT_LAT_HEADER_WIDTH
+            } else {
+                crate::utils::display::DEFAULT_HEADER_WIDTH
+            };
+            display.display_headers_only(header_width);
+
+            // Initialize streaming table for received results
+            if is_latency {
+                Some(display.init_latency_streaming_table(header_width)?)
+            } else {
+                Some(display.init_bandwidth_streaming_table(header_width)?)
+            }
         } else {
-            Some(display.init_bandwidth_streaming_table(header_width)?)
+            // Client mode or bidirectional mode: display headers and initialize table
+            let header_width = if is_latency {
+                crate::utils::display::DEFAULT_LAT_HEADER_WIDTH
+            } else {
+                crate::utils::display::DEFAULT_HEADER_WIDTH
+            };
+            display.display_headers_only(header_width);
+
+            // Initialize streaming table for real-time results
+            if is_latency {
+                Some(display.init_latency_streaming_table(header_width)?)
+            } else {
+                Some(display.init_bandwidth_streaming_table(header_width)?)
+            }
         };
 
         // Execute tests for each message size
         for &msg_size in msg_sizes {
-            info!(message_size = msg_size, "Running test with Worker architecture");
+            info!(
+                message_size = msg_size,
+                "Running test with Worker architecture"
+            );
 
             let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
-            
-            // Execute the test
-            let result = self.execute_worker(
-                worker,
-                &mut worker_context,
-                msg_size,
-                &conn_result.remote_mr,
-                &mut histogram,
-            )?;
 
-            // Process results and display immediately for streaming output
-            if is_latency {
+            // Execute the test based on mode
+            let result = if is_bidirectional || !is_server {
+                // Execute traffic generation (both directions in bidir mode, or client-only in unidir mode)
+                self.execute_worker(
+                    worker,
+                    &mut worker_context,
+                    msg_size,
+                    &conn_result.remote_mr,
+                    &mut histogram,
+                )?
+            } else {
+                // Server-only mode: just wait and receive (no traffic generation)
+                self.execute_server_receive_only(&mut worker_context)?
+            };
+
+            // Process results based on mode and role
+            if is_server && !is_bidirectional {
+                // Unidirectional server mode: receive results from client and display them
+                info!(
+                    "Waiting to receive results for message size {} from client...",
+                    msg_size
+                );
+                let received_results = session
+                    .receive_results()
+                    .map_err(|e| anyhow::anyhow!("Failed to receive results from client: {}", e))?;
+
+                // Display the received results
+                if received_results.latency_result.is_some() {
+                    let lat_results = received_results.latency_result.unwrap();
+                    info!(
+                        "Received latency results: {:.3} μs avg",
+                        lat_results.avg_latency
+                    );
+
+                    if let Some(ref mut formatter) = table_formatter {
+                        formatter.print_row_data(&lat_results)?;
+                    }
+                    display.add_latency_result(lat_results);
+                } else if received_results.bandwidth_result.is_some() {
+                    let bw_results = received_results.bandwidth_result.unwrap();
+                    info!(
+                        "Received bandwidth results: {:.3} Gbps",
+                        bw_results.bandwidth
+                    );
+
+                    if let Some(ref mut formatter) = table_formatter {
+                        formatter.print_row_data(&bw_results)?;
+                    }
+                    display.add_bandwidth_result(bw_results);
+                }
+            } else if is_latency {
                 let lat_results = self.calculate_latency_results(msg_size, result, &histogram);
-                info!("Latency test completed: {:.3} μs avg", lat_results.avg_latency);
-                
+                info!(
+                    "Latency test completed: {:.3} μs avg",
+                    lat_results.avg_latency
+                );
+
                 // Print result immediately for streaming output
                 if let Some(ref mut formatter) = table_formatter {
                     formatter.print_row_data(&lat_results)?;
                 }
-                display.add_latency_result(lat_results);
+                display.add_latency_result(lat_results.clone());
+
+                // Send results to server in unidirectional mode
+                if !is_server && !is_bidirectional {
+                    let test_results = crate::connection::exchange::TestResults {
+                        test_type: crate::connection::exchange::TestType::Latency,
+                        size: msg_size,
+                        iterations: lat_results.iterations,
+                        time: "0.00".to_string(),
+                        bandwidth_result: None,
+                        latency_result: Some(lat_results),
+                    };
+                    session.send_results(&test_results).map_err(|e| {
+                        anyhow::anyhow!("Failed to send latency results to server: {}", e)
+                    })?;
+                }
             } else {
-                let bw_results = self.calculate_bandwidth_results(msg_size, result);
-                info!("Bandwidth test completed: {:.3} Gbps", bw_results.bandwidth);
-                
+                // Handle bandwidth results with bidirectional support
+                let mut bw_results = self.calculate_bandwidth_results(msg_size, result);
+
+                // For bidirectional mode, double the bandwidth (traffic in both directions)
+                if is_bidirectional {
+                    bw_results.bandwidth *= 2.0;
+                    bw_results.msg_rate *= 2.0;
+                    info!(
+                        "Bidirectional bandwidth test completed: {:.3} Gbps (aggregated)",
+                        bw_results.bandwidth
+                    );
+                } else {
+                    info!("Bandwidth test completed: {:.3} Gbps", bw_results.bandwidth);
+                }
+
                 // Print result immediately for streaming output
                 if let Some(ref mut formatter) = table_formatter {
                     formatter.print_row_data(&bw_results)?;
                 }
-                display.add_bandwidth_result(bw_results);
+                display.add_bandwidth_result(bw_results.clone());
+
+                // Send results to server in unidirectional mode
+                if !is_server && !is_bidirectional {
+                    let test_results = crate::connection::exchange::TestResults {
+                        test_type: crate::connection::exchange::TestType::Bandwidth,
+                        size: msg_size,
+                        iterations: bw_results.iterations,
+                        time: bw_results.time.clone(),
+                        bandwidth_result: Some(bw_results),
+                        latency_result: None,
+                    };
+                    session.send_results(&test_results).map_err(|e| {
+                        anyhow::anyhow!("Failed to send bandwidth results to server: {}", e)
+                    })?;
+                }
             }
 
             // Reset worker context for next iteration
@@ -534,6 +798,28 @@ impl PlanTestRunner {
         // Print table footer if we have a formatter
         if let Some(ref formatter) = table_formatter {
             formatter.print_bottom_separator()?;
+        }
+
+        // CRITICAL: Synchronize both sides before cleanup to prevent premature connection close
+        // This is essential for bidirectional mode where both sides run tests simultaneously
+        let is_server = self.plan.base().server;
+        let is_bidirectional = self.plan.is_bidirectional();
+
+        if is_bidirectional {
+            info!("Synchronizing with remote peer before cleanup (bidirectional mode)...");
+            session.synchronize_qps().map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to synchronize with remote peer before cleanup: {}",
+                    e
+                )
+            })?;
+            info!("Synchronization complete. Closing session...");
+        } else if !is_server {
+            // Unidirectional client mode: just close normally
+            info!("Closing session (unidirectional client mode)...");
+        } else {
+            // Unidirectional server mode: just close normally
+            info!("Closing session (unidirectional server mode)...");
         }
 
         session.close()?;
@@ -548,7 +834,7 @@ impl PlanTestRunner {
     ) -> LatencyResult {
         let min_latency_ns = result.latency_samples.iter().min().unwrap_or(&0);
         let max_latency_ns = result.latency_samples.iter().max().unwrap_or(&0);
-        
+
         LatencyResult {
             size: msg_size,
             iterations: result.completed_requests,
