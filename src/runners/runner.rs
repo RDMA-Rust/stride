@@ -281,8 +281,8 @@ impl PlanTestRunner {
                     self.post_operations(worker, worker_context, post_list, msg_size, remote_mr)?;
                 }
 
-                // For bandwidth tests, poll in batches
-                self.poll_completions(&cq, worker_context)?;
+                // For bandwidth tests, poll completions in batches
+                self.poll_completions_once(&cq, worker_context)?;
             }
         }
 
@@ -344,37 +344,65 @@ impl PlanTestRunner {
         }
     }
 
-    /// Poll completions aggressively (bandwidth mode)
+    /// Poll completions once and return whether any were found (bandwidth mode)
     #[inline(always)]
-    fn poll_completions(
+    fn poll_completions_once(
         &self,
         cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
         worker_context: &mut WorkerContext,
-    ) -> Result<()> {
-        // Proper CQ polling pattern - poll ALL available completions for maximum throughput
+    ) -> Result<bool> {
+        let cqe_poll_limit = self.plan.poll_batch(); // Respect user-configured batch size
+        
+        // Proper CQ polling pattern - poll up to cqe_poll_limit completions to prevent bubbles
         match cq.borrow_mut().start_poll() {
             Ok(mut poller) => {
-                // Poll ALL available completions, not just a limited batch
-                // This is critical for high-throughput bandwidth tests
-                while let Some(wc) = poller.next() {
-                    // Hot path: Use const comparison for maximum performance
-                    if wc.status() != (WorkCompletionStatus::Success as u32) {
-                        return Err(anyhow::anyhow!(
-                            "Failed status {:?} ({}) for iteration {}",
-                            Into::<WorkCompletionStatus>::into(wc.status()),
-                            wc.status(),
-                            wc.wr_id() & 0xFFFFFFFF
-                        ));
-                    }
+                // PERFORMANCE CRITICAL: Batch completion counting with per-QP tracking
+                let mut completed_count = 0u32;
+                let mut qp_completion_counts = vec![0u32; worker_context.queue_pair_count()];
+                
+                // Poll up to cqe_poll_limit completions to maintain posting/polling balance
+                // This prevents pipeline bubbles when completions arrive very fast
+                while completed_count < cqe_poll_limit {
+                    if let Some(wc) = poller.next() {
+                        // Hot path: Use const comparison for maximum performance
+                        if wc.status() != (WorkCompletionStatus::Success as u32) {
+                            return Err(anyhow::anyhow!(
+                                "Failed status {:?} ({}) for iteration {}",
+                                Into::<WorkCompletionStatus>::into(wc.status()),
+                                wc.status(),
+                                wc.wr_id() & 0xFFFFFFFF
+                            ));
+                        }
 
-                    worker_context.record_request_completed();
+                        // Extract QP index from wr_id (we can derive it from completion queue)
+                        // For now, distribute completions evenly across QPs
+                        // TODO: Extract actual QP index from wr_id if needed
+                        let qp_idx = (completed_count as usize) % worker_context.queue_pair_count();
+                        qp_completion_counts[qp_idx] += 1;
+                        completed_count += 1;
+                    } else {
+                        // No more completions available right now
+                        break;
+                    }
+                }
+                
+                // Batch update: update per-QP completion counts (perftest-style ccnt tracking)
+                if completed_count > 0 {
+                    for (qp_idx, qp_completions) in qp_completion_counts.iter().enumerate() {
+                        if *qp_completions > 0 {
+                            worker_context.record_qp_requests_completed(qp_idx, *qp_completions);
+                        }
+                    }
+                    Ok(true) // Found completions
+                } else {
+                    Ok(false) // No completions in this poll
                 }
             }
             Err(_) => {
-                // No completions available, continue
+                // No completions available
+                Ok(false)
             }
         }
-        Ok(())
     }
 
     /// Helper method to post operations to QPs
@@ -402,19 +430,39 @@ impl PlanTestRunner {
         let inflight = worker_context.inflight_requests;
         let qp_count = worker_context.queue_pair_count();
 
-        // Distribute work across all available QPs
+        // perftest approach: each QP posts post_list operations (not split across QPs)
+        // With per-QP tx_depth control like perftest's scnt/ccnt pattern
         for qp_idx in 0..qp_count {
-            // Calculate how many operations this QP should handle
-            let operations_per_qp = post_list / qp_count;
-            let extra_operations = if qp_idx < (post_list % qp_count) {
-                1
-            } else {
-                0
-            };
-            let qp_operations = operations_per_qp + extra_operations;
-
-            if qp_operations == 0 {
-                continue;
+            // perftest-style per-QP flow control check
+            if !worker_context.can_qp_post_request(qp_idx, tx_depth) {
+                continue; // Skip this QP if it's at tx_depth limit
+            }
+            
+            // Calculate how many operations this QP can actually post
+            let qp_inflight = worker_context.qp_send_counts[qp_idx] - worker_context.qp_completion_counts[qp_idx];
+            let qp_available_slots = tx_depth - qp_inflight;
+            let actual_post_list = post_list.min(qp_available_slots as usize);
+            
+            if actual_post_list == 0 {
+                continue; // No slots available for this QP
+            }
+            
+            // Pre-calculate addresses for this QP's operations before mutable borrow
+            let qp_operation_base = worker_context.qp_send_counts[qp_idx];
+            let mut local_addrs = Vec::with_capacity(actual_post_list);
+            let mut remote_addrs = Vec::with_capacity(actual_post_list);
+            
+            for i in 0..actual_post_list {
+                let operation_within_qp = (qp_operation_base + i as u32) & tx_depth_mask;
+                
+                // PERFORMANCE CRITICAL: Use pre-calculated addresses (batch lookup)
+                let local_addr = worker_context.get_local_addr(qp_idx, operation_within_qp);
+                local_addrs.push(local_addr);
+                
+                if is_write {
+                    let remote_addr = worker_context.get_remote_addr(qp_idx, operation_within_qp);
+                    remote_addrs.push(remote_addr);
+                }
             }
 
             // Get QP (unchecked for performance)
@@ -424,31 +472,18 @@ impl PlanTestRunner {
             // Create post guard for this QP
             let mut guard = qp.start_post_send();
 
-            // Post operations for this QP
-            for i in 0..qp_operations {
-                let global_op_index = qp_idx * operations_per_qp
-                    + i
-                    + if qp_idx >= (post_list % qp_count) {
-                        post_list % qp_count
-                    } else {
-                        0
-                    };
+            // Each QP posts actual_post_list operations (perftest style with flow control)
+            for i in 0..actual_post_list {
+                // Global index for wr_id tracking (includes QP information)
+                let global_op_index = qp_operation_base + i as u32;
+                let wr_id = thread_id_shifted | (global_op_index as u64);
 
-                // PERFORMANCE CRITICAL: Use bitwise AND instead of modulo (80-100x faster)
-                let operation_index =
-                    (completed + inflight + global_op_index as u32) & tx_depth_mask;
+                // Use pre-calculated addresses (no calculation in hot path)
+                let local_addr = local_addrs[i];
 
-                // perftest-style address calculation: use worker's address cycling
-                let local_addr = worker.calculate_operation_addr(operation_index, msg_size);
-
-                let wr_id =
-                    thread_id_shifted | ((completed + inflight + global_op_index as u32) as u64);
-
-                // For WRITE operations, use remote memory info with same cycling pattern
+                // For WRITE operations, use pre-calculated remote addresses
                 let send_handle = if is_write {
-                    // Remote side uses same offset pattern as local side
-                    let local_offset = local_addr - (worker.base_addr as u64);
-                    let remote_addr = remote_mr.addr + local_offset;
+                    let remote_addr = remote_addrs[i];
                     guard
                         .construct_wr(wr_id, WorkRequestFlags::Signaled)
                         .setup_write(remote_mr.rkey, remote_addr)
@@ -466,10 +501,10 @@ impl PlanTestRunner {
 
             // Post all operations for this QP
             guard.post()?;
+            
+            // Update per-QP counters (perftest-style scnt tracking)
+            worker_context.record_qp_requests_posted(qp_idx, actual_post_list as u32);
         }
-
-        // Update counters after posting (batch update for performance)
-        worker_context.record_requests_posted(post_list as u32);
         Ok(())
     }
 
@@ -509,21 +544,21 @@ impl PlanTestRunner {
         // Create workers using perftest-style shared memory allocation
         // Following perftest pattern: shared buffer across QPs with cache-aligned cycling
 
-        // Calculate buffer size following perftest BUFF_SIZE and INC patterns
-        const CYCLE_BUFFER_SIZE: usize = 4096; // Minimum buffer size (like perftest cycle_buffer)
+        // Calculate buffer size following perftest BUFF_SIZE and INC patterns exactly
+        const CYCLE_BUFFER_SIZE: usize = 4096; // perftest cycle_buffer
         const CACHE_LINE_SIZE: usize = 64; // Standard cache line size
-
-        // BUFF_SIZE equivalent: ensure minimum 4K for small messages
-        let effective_msg_size = if max_msg_size < CYCLE_BUFFER_SIZE as u32 {
+        
+        // perftest BUFF_SIZE macro: ensure minimum cycle buffer size for small messages
+        let buff_size = if max_msg_size < CYCLE_BUFFER_SIZE as u32 {
             CYCLE_BUFFER_SIZE
         } else {
             max_msg_size as usize
         };
 
-        // INC equivalent: cache-aligned increment size
-        let increment_size = if effective_msg_size > CACHE_LINE_SIZE {
-            // Round up to cache line boundary
-            (effective_msg_size + CACHE_LINE_SIZE - 1) & !(CACHE_LINE_SIZE - 1)
+        // perftest INC macro: cache-aligned increment size calculation
+        let increment_size = if buff_size > CACHE_LINE_SIZE {
+            // Round up to cache line boundary (like perftest ROUND_UP)
+            (buff_size + CACHE_LINE_SIZE - 1) & !(CACHE_LINE_SIZE - 1)
         } else {
             CACHE_LINE_SIZE
         };
@@ -533,9 +568,9 @@ impl PlanTestRunner {
         let total_buffer_size = increment_size * 2 * qp_count;
 
         info!(
-            "Memory allocation: msg_size={} -> effective_size={}, increment={}, total_buffer={}KB",
+            "Memory allocation: msg_size={} -> buff_size={}, increment={}, total_buffer={}KB",
             max_msg_size,
-            effective_msg_size,
+            buff_size,
             increment_size,
             total_buffer_size / 1024
         );
@@ -558,16 +593,20 @@ impl PlanTestRunner {
             )?
         };
 
-        // Create workers sharing the same memory region (following perftest pattern)
+        // Create workers sharing the same memory region (following perftest pattern exactly)
         let mut workers = Vec::with_capacity(qp_count);
         for thread_id in 0..qp_count {
+            // perftest QP offset calculation: each QP gets increment * 2 space
+            // This ensures proper spacing for both send and receive buffers per QP
+            let qp_offset = thread_id * increment_size * 2;
+            
             let worker = Worker::new_with_shared_memory(
                 ctx.clone(),
                 pd.clone(),
                 shared_mr.lkey(),                      // Just pass the lkey
                 shared_memory.get_handle() as *mut u8, // Base pointer for address calculation
-                increment_size,                        // Cache-aligned increment for this worker
-                thread_id * increment_size * 2,        // Offset for this QP (2 = send/recv factor)
+                increment_size,                        // perftest INC value for this worker
+                qp_offset,                            // perftest-style QP offset calculation
                 self.plan.clone(),
                 thread_id,
                 tx_depth,
@@ -593,6 +632,9 @@ impl PlanTestRunner {
         // Setup connection using the worker
         let (conn_result, mut session) =
             self.setup_connection(worker, &mut worker_context, total_buffer_size)?;
+
+        // Update pre-calculated remote addresses now that we have remote MR info
+        worker_context.update_remote_addresses(conn_result.remote_mr.addr);
 
         // Create display output for results
         let config = TestConfiguration {
