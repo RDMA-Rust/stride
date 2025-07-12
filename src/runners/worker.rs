@@ -52,12 +52,14 @@ pub struct WorkerContext<'a> {
     pub queue_pairs: Vec<GenericQueuePair<'a>>,
     /// Completion queue wrapped in Rc<RefCell<>> for safe sharing
     pub completion_queue: Rc<RefCell<ExtendedCompletionQueue<'a>>>,
-    /// Pre-calculated local buffer addresses for each QP and tx_depth index
-    /// Format: qp_buffer_addrs[qp_idx][operation_index] = local_addr
-    pub qp_buffer_addrs: Vec<Vec<u64>>,
-    /// Pre-calculated remote buffer addresses for WRITE operations
-    /// Format: qp_remote_addrs[qp_idx][operation_index] = remote_addr  
-    pub qp_remote_addrs: Vec<Vec<u64>>,
+    /// Pre-calculated local buffer addresses flattened for cache efficiency
+    /// Format: qp_buffer_addrs[qp_idx * tx_depth + operation_index] = local_addr
+    pub qp_buffer_addrs: Vec<u64>,
+    /// Pre-calculated remote buffer addresses flattened for cache efficiency
+    /// Format: qp_remote_addrs[qp_idx * tx_depth + operation_index] = remote_addr
+    pub qp_remote_addrs: Vec<u64>,
+    /// TX depth for index calculations (cached for performance)
+    pub tx_depth: u32,
     /// Per-QP send counters (like perftest's scnt[])
     pub qp_send_counts: Vec<u32>,
     /// Per-QP completion counters (like perftest's ccnt[])
@@ -151,10 +153,10 @@ impl<'a> Worker<'a> {
     #[inline(always)]
     pub fn calculate_operation_addr(&self, operation_index: u32, _msg_size: u32) -> u64 {
         // PERFORMANCE CRITICAL: perftest-style address cycling for optimal cache behavior
-        
+
         // perftest pattern: cycle within the worker's own memory space
         // operation_index is masked to tx_depth, so we cycle within our allocated space
-        
+
         // Each operation gets a cache-line aligned offset within this worker's space
         // Use smaller cycling to stay within worker boundaries
         let cycle_mask = 0x3F; // Cycle through 64 positions (4KB for 64-byte cache lines)
@@ -219,6 +221,7 @@ impl<'a> WorkerContext<'a> {
             queue_pairs: Vec::new(),
             qp_buffer_addrs: Vec::new(),
             qp_remote_addrs: Vec::new(),
+            tx_depth: worker.tx_depth,
             qp_send_counts: Vec::new(),
             qp_completion_counts: Vec::new(),
             total_requests,
@@ -255,23 +258,22 @@ impl<'a> WorkerContext<'a> {
         );
 
         // Pre-calculate buffer addresses for this QP to avoid hot-path calculations
-        let qp_idx = self.queue_pairs.len();
-        let mut local_addrs = Vec::with_capacity(worker.tx_depth as usize);
-        let mut remote_addrs = Vec::with_capacity(worker.tx_depth as usize);
         
+        // Reserve space for this QP's addresses in the flattened vectors
+        let tx_depth = worker.tx_depth as usize;
+        self.qp_buffer_addrs.reserve(tx_depth);
+        self.qp_remote_addrs.reserve(tx_depth);
+
         for op_idx in 0..worker.tx_depth {
             // Pre-calculate local address for this operation index
             let local_addr = worker.calculate_operation_addr(op_idx, 0); // msg_size not needed for addr calc
-            local_addrs.push(local_addr);
-            
+            self.qp_buffer_addrs.push(local_addr);
+
             // Pre-calculate remote address offset (will be updated with actual remote_mr later)
             let local_offset = local_addr - (worker.base_addr as u64);
-            remote_addrs.push(local_offset); // Store offset for now, will add remote_mr.addr later
+            self.qp_remote_addrs.push(local_offset); // Store offset for now, will add remote_mr.addr later
         }
-        
-        self.qp_buffer_addrs.push(local_addrs);
-        self.qp_remote_addrs.push(remote_addrs);
-        self.qp_send_counts.push(0);        // Initialize per-QP send counter
+        self.qp_send_counts.push(0); // Initialize per-QP send counter
         self.qp_completion_counts.push(0); // Initialize per-QP completion counter
         self.queue_pairs.push(qp);
         Ok(())
@@ -290,10 +292,6 @@ impl<'a> WorkerContext<'a> {
 
     /// Check if a specific QP can post more requests (perftest-style per-QP flow control)
     pub fn can_qp_post_request(&self, qp_idx: usize, tx_depth: u32) -> bool {
-        if qp_idx >= self.qp_send_counts.len() {
-            return false;
-        }
-        
         // perftest pattern: scnt[qp] - ccnt[qp] < tx_depth
         let qp_inflight = self.qp_send_counts[qp_idx] - self.qp_completion_counts[qp_idx];
         qp_inflight < tx_depth
@@ -336,7 +334,7 @@ impl<'a> WorkerContext<'a> {
     /// Record that multiple requests were completed (batch version for performance)
     #[inline(always)]
     pub fn record_requests_completed(&mut self, count: u32) {
-        self.inflight_requests = self.inflight_requests.saturating_sub(count);
+        self.inflight_requests -= count;
         self.completed_requests += count;
         // Removed debug logging from hot path for performance
     }
@@ -344,20 +342,16 @@ impl<'a> WorkerContext<'a> {
     /// Record that requests were posted to a specific QP (perftest-style per-QP tracking)
     #[inline(always)]
     pub fn record_qp_requests_posted(&mut self, qp_idx: usize, count: u32) {
-        if qp_idx < self.qp_send_counts.len() {
-            self.qp_send_counts[qp_idx] += count;
-            self.inflight_requests += count;
-        }
+        self.qp_send_counts[qp_idx] += count;
+        self.inflight_requests += count;
     }
 
     /// Record that requests were completed from a specific QP (perftest-style per-QP tracking)
     #[inline(always)]
     pub fn record_qp_requests_completed(&mut self, qp_idx: usize, count: u32) {
-        if qp_idx < self.qp_completion_counts.len() {
-            self.qp_completion_counts[qp_idx] += count;
-            self.inflight_requests = self.inflight_requests.saturating_sub(count);
-            self.completed_requests += count;
-        }
+        self.qp_completion_counts[qp_idx] += count;
+        self.inflight_requests = self.inflight_requests.saturating_sub(count);
+        self.completed_requests += count;
     }
 
     /// Get progress as a percentage
@@ -386,7 +380,7 @@ impl<'a> WorkerContext<'a> {
         self.queue_pairs.get_unchecked(index)
     }
 
-    /// Get mutable queue pair by index (unchecked for hot paths)  
+    /// Get mutable queue pair by index (unchecked for hot paths)
     /// SAFETY: Caller must ensure index < queue_pair_count()
     #[inline(always)]
     pub unsafe fn get_queue_pair_mut_unchecked(
@@ -408,35 +402,27 @@ impl<'a> WorkerContext<'a> {
 
     /// Update pre-calculated remote addresses with actual remote memory region base
     pub fn update_remote_addresses(&mut self, remote_mr_addr: u64) {
-        for qp_remote_addrs in &mut self.qp_remote_addrs {
-            for remote_addr in qp_remote_addrs.iter_mut() {
-                *remote_addr += remote_mr_addr; // Convert offset to absolute address
-            }
+        for remote_addr in &mut self.qp_remote_addrs {
+            *remote_addr += remote_mr_addr; // Convert offset to absolute address
         }
     }
 
     /// Get pre-calculated local address for QP and operation index (hot path optimized)
     #[inline(always)]
     pub fn get_local_addr(&self, qp_idx: usize, operation_index: u32) -> u64 {
-        // PERFORMANCE CRITICAL: Direct array access, no bounds checking
+        // PERFORMANCE CRITICAL: Flattened array access, single indirection
         // SAFETY: Caller must ensure qp_idx < queue_pair_count() and operation_index < tx_depth
-        unsafe {
-            *self.qp_buffer_addrs
-                .get_unchecked(qp_idx)
-                .get_unchecked(operation_index as usize)
-        }
+        let flat_index = qp_idx * self.tx_depth as usize + operation_index as usize;
+        unsafe { *self.qp_buffer_addrs.get_unchecked(flat_index) }
     }
 
     /// Get pre-calculated remote address for QP and operation index (hot path optimized)
     #[inline(always)]
     pub fn get_remote_addr(&self, qp_idx: usize, operation_index: u32) -> u64 {
-        // PERFORMANCE CRITICAL: Direct array access, no bounds checking
+        // PERFORMANCE CRITICAL: Flattened array access, single indirection
         // SAFETY: Caller must ensure qp_idx < queue_pair_count() and operation_index < tx_depth
-        unsafe {
-            *self.qp_remote_addrs
-                .get_unchecked(qp_idx)
-                .get_unchecked(operation_index as usize)
-        }
+        let flat_index = qp_idx * self.tx_depth as usize + operation_index as usize;
+        unsafe { *self.qp_remote_addrs.get_unchecked(flat_index) }
     }
 }
 

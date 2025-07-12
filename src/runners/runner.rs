@@ -216,7 +216,6 @@ impl PlanTestRunner {
         let mut result = WorkerResult::new(worker.thread_id, worker_context.total_requests);
 
         let is_latency = self.plan.is_latency();
-        let is_write = self.plan.needs_remote_addr();
         let tx_depth = worker.tx_depth;
 
         let mut min_latency_ns: u64 = u64::MAX;
@@ -226,64 +225,11 @@ impl PlanTestRunner {
 
         let start_time = clock.now();
 
-        // For latency tests with tx_depth=1, use a different measurement pattern
+        // Use separate callbacks for latency and bandwidth tests
         if is_latency && tx_depth == 1 {
-            // Latency mode: post one operation, wait for completion, repeat
-            while !worker_context.is_complete() {
-                if worker_context.can_post_request(tx_depth) {
-                    let operation_start_time = clock.now(); // Precise timing for single operation
-
-                    // Post single operation across QPs (for tx_depth=1, this is typically 1 op)
-                    let post_list = 1;
-                    self.post_operations(worker, worker_context, post_list, msg_size, remote_mr)?;
-
-                    // Immediately wait for this operation's completion
-                    self.wait_for_completion(
-                        &cq,
-                        operation_start_time,
-                        histogram,
-                        &mut min_latency_ns,
-                        &mut max_latency_ns,
-                        worker_context,
-                        &clock,
-                    )?;
-                } else {
-                    // No more operations to post, just wait for remaining completions
-                    if worker_context.inflight_requests > 0 {
-                        self.wait_for_completion(
-                            &cq,
-                            start_time, // Use start_time for remaining ops
-                            histogram,
-                            &mut min_latency_ns,
-                            &mut max_latency_ns,
-                            worker_context,
-                            &clock,
-                        )?;
-                    }
-                }
-            }
+            self.execute_latency_test(worker, worker_context, msg_size, remote_mr, histogram, &clock, &cq, start_time, &mut min_latency_ns, &mut max_latency_ns)?;
         } else {
-            // Bandwidth mode: batch posting and polling
-            while !worker_context.is_complete() {
-                // Post operations if we can - distribute across multiple QPs
-                while worker_context.can_post_request(tx_depth) {
-                    let post_list = self.plan.base().post_list.min(
-                        worker_context.total_requests
-                            - worker_context.completed_requests
-                            - worker_context.inflight_requests,
-                    ) as usize;
-
-                    if post_list == 0 {
-                        break;
-                    }
-
-                    // Use helper method to post operations
-                    self.post_operations(worker, worker_context, post_list, msg_size, remote_mr)?;
-                }
-
-                // For bandwidth tests, poll completions in batches
-                self.poll_completions_once(&cq, worker_context)?;
-            }
+            self.execute_bandwidth_test(worker, worker_context, msg_size, remote_mr, &cq)?;
         }
 
         let end_time = clock.now();
@@ -298,6 +244,92 @@ impl PlanTestRunner {
         }
 
         Ok(result)
+    }
+
+    /// Latency test callback - post one operation, wait for completion, repeat
+    fn execute_latency_test<'a>(
+        &self,
+        worker: &Worker<'a>,
+        worker_context: &mut WorkerContext<'a>,
+        msg_size: u32,
+        remote_mr: &crate::connection::exchange::MemoryRegionInfo,
+        histogram: &mut hdrhistogram::Histogram<u64>,
+        clock: &Clock,
+        cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
+        start_time: Instant,
+        min_latency_ns: &mut u64,
+        max_latency_ns: &mut u64,
+    ) -> Result<()> {
+        let tx_depth = worker.tx_depth;
+
+        while !worker_context.is_complete() {
+            if worker_context.can_post_request(tx_depth) {
+                let operation_start_time = clock.now(); // Precise timing for single operation
+
+                // Post single operation across QPs (for tx_depth=1, this is typically 1 op)
+                let post_list = 1;
+                self.post_operations(worker, worker_context, post_list, msg_size, remote_mr)?;
+
+                // Immediately wait for this operation's completion
+                self.wait_for_completion(
+                    cq,
+                    operation_start_time,
+                    histogram,
+                    min_latency_ns,
+                    max_latency_ns,
+                    worker_context,
+                    clock,
+                )?;
+            } else {
+                // No more operations to post, just wait for remaining completions
+                if worker_context.inflight_requests > 0 {
+                    self.wait_for_completion(
+                        cq,
+                        start_time, // Use start_time for remaining ops
+                        histogram,
+                        min_latency_ns,
+                        max_latency_ns,
+                        worker_context,
+                        clock,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Bandwidth test callback - batch posting and polling
+    fn execute_bandwidth_test<'a>(
+        &self,
+        worker: &Worker<'a>,
+        worker_context: &mut WorkerContext<'a>,
+        msg_size: u32,
+        remote_mr: &crate::connection::exchange::MemoryRegionInfo,
+        cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
+    ) -> Result<()> {
+        let tx_depth = worker.tx_depth;
+
+        while !worker_context.is_complete() {
+            // Post operations if we can - distribute across multiple QPs
+            while worker_context.can_post_request(tx_depth) {
+                let post_list = self.plan.base().post_list.min(
+                    worker_context.total_requests
+                        - worker_context.completed_requests
+                        - worker_context.inflight_requests,
+                ) as usize;
+
+                if post_list == 0 {
+                    break;
+                }
+
+                // Use helper method to post operations
+                self.post_operations(worker, worker_context, post_list, msg_size, remote_mr)?;
+            }
+
+            // For bandwidth tests, poll completions in batches
+            self.poll_completions_once(cq, worker_context)?;
+        }
+        Ok(())
     }
 
     /// Wait for a single completion (latency mode)
@@ -447,24 +479,17 @@ impl PlanTestRunner {
                 continue; // No slots available for this QP
             }
             
-            // Pre-calculate addresses for this QP's operations before mutable borrow
+            // Pre-calculate base values for this QP's operations
             let qp_operation_base = worker_context.qp_send_counts[qp_idx];
-            let mut local_addrs = Vec::with_capacity(actual_post_list);
-            let mut remote_addrs = Vec::with_capacity(actual_post_list);
-            
-            for i in 0..actual_post_list {
-                let operation_within_qp = (qp_operation_base + i as u32) & tx_depth_mask;
-                
-                // PERFORMANCE CRITICAL: Use pre-calculated addresses (batch lookup)
-                let local_addr = worker_context.get_local_addr(qp_idx, operation_within_qp);
-                local_addrs.push(local_addr);
-                
-                if is_write {
-                    let remote_addr = worker_context.get_remote_addr(qp_idx, operation_within_qp);
-                    remote_addrs.push(remote_addr);
-                }
-            }
 
+            // Pre-calculate all addresses before mutable borrow to avoid borrow conflicts
+            let tx_depth_usize = tx_depth as usize;
+            let qp_base_index = qp_idx * tx_depth_usize;
+            
+            // Extract raw pointers to address arrays before mutable borrow
+            let local_addrs_ptr = worker_context.qp_buffer_addrs.as_ptr();
+            let remote_addrs_ptr = worker_context.qp_remote_addrs.as_ptr();
+            
             // Get QP (unchecked for performance)
             // SAFETY: qp_idx < qp_count, which is the number of QPs we created
             let qp = unsafe { worker_context.get_queue_pair_mut_unchecked(qp_idx) };
@@ -478,12 +503,16 @@ impl PlanTestRunner {
                 let global_op_index = qp_operation_base + i as u32;
                 let wr_id = thread_id_shifted | (global_op_index as u64);
 
-                // Use pre-calculated addresses (no calculation in hot path)
-                let local_addr = local_addrs[i];
+                // PERFORMANCE CRITICAL: Direct flat index calculation for maximum performance
+                let operation_within_qp = (qp_operation_base + i as u32) & tx_depth_mask;
+                let flat_index = qp_base_index + operation_within_qp as usize;
+                
+                // Get addresses directly from flattened arrays using raw pointers
+                let local_addr = unsafe { *local_addrs_ptr.add(flat_index) };
 
                 // For WRITE operations, use pre-calculated remote addresses
                 let send_handle = if is_write {
-                    let remote_addr = remote_addrs[i];
+                    let remote_addr = unsafe { *remote_addrs_ptr.add(flat_index) };
                     guard
                         .construct_wr(wr_id, WorkRequestFlags::Signaled)
                         .setup_write(remote_mr.rkey, remote_addr)
