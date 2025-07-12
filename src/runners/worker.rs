@@ -408,9 +408,14 @@ impl<'a> WorkerContext<'a> {
     }
 
     /// Post receive buffers for SEND operations (both client and server need this)
-    pub fn post_receive_buffers(&mut self, worker: &Worker<'a>, rx_depth: u32, msg_size: u32) -> anyhow::Result<()> {
-        use sideway::ibverbs::queue_pair::{QueuePair, WorkRequestFlags, SetScatterGatherEntry};
-        
+    pub fn post_receive_buffers(
+        &mut self,
+        worker: &Worker<'a>,
+        rx_depth: u32,
+        msg_size: u32,
+    ) -> anyhow::Result<()> {
+        use sideway::ibverbs::queue_pair::{QueuePair, SetScatterGatherEntry, WorkRequestFlags};
+
         for qp_idx in 0..self.queue_pair_count() {
             // Get QP (unchecked for performance)
             // SAFETY: qp_idx < queue_pair_count(), which is the number of QPs we created
@@ -429,7 +434,7 @@ impl<'a> WorkerContext<'a> {
 
                 // Create receive work request
                 let recv_handle = guard.construct_wr(wr_id);
-                
+
                 // Setup scatter-gather entry for receive buffer
                 unsafe {
                     recv_handle.setup_sge(worker.lkey(), recv_addr, msg_size);
@@ -437,7 +442,9 @@ impl<'a> WorkerContext<'a> {
             }
 
             // Post all receive buffers for this QP
-            guard.post().map_err(|e| anyhow::anyhow!("Failed to post receive buffers: {}", e))?;
+            guard
+                .post()
+                .map_err(|e| anyhow::anyhow!("Failed to post receive buffers: {}", e))?;
         }
 
         Ok(())

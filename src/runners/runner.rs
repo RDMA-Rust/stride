@@ -1,7 +1,7 @@
 use crate::cli::plan::Plan;
 use crate::connection::exchange::ConnectionSetupResult;
 use crate::connection::session::ConnectionSession;
-use crate::connection::{ConnectionParams, EndpointRole};
+use crate::connection::{ConnectionParams, ConnectionType, EndpointRole};
 use crate::context::device::open_device_context;
 use crate::memory::{AlignedConfig, HugepageConfig, MemoryAllocator, MemoryType};
 use crate::runners::worker::{Worker, WorkerContext, WorkerResult};
@@ -62,7 +62,7 @@ impl PlanTestRunner {
         Ok(Some(fc_context))
     }
 
-    /// Setup connection using the existing session logic but with Worker interface
+    /// Setup connection using the Worker interface
     fn setup_connection<'a>(
         &self,
         worker: &Worker<'a>,
@@ -89,7 +89,7 @@ impl PlanTestRunner {
         conn_params.timeout = Duration::from_micros(4 * (1u64 << timeout_factor));
 
         let mut session = ConnectionSession::new(
-            "tcp",
+            ConnectionType::Tcp,
             worker.device.clone(),
             worker.pd.clone(),
             conn_params,
@@ -98,16 +98,14 @@ impl PlanTestRunner {
         )?;
 
         // Initialize the connection session
-        let _ = session.initialize();
+        session.initialize()?;
 
         // Establish connection
         let address = &self.plan.base().addr;
         session.establish_connection(address)?;
 
-        let gid_entry = worker.device.query_gid_ex(1, gid_index as u32)?;
-        let gid_type = gid_entry.gid_type();
-        let local_gid = gid_entry.gid();
-        let mut remote_gid = Gid::default();
+        let local_gid = session.local_gid().unwrap_or_default();
+        let mut remote_gid = session.remote_gid().unwrap_or_default();
 
         // Setup each queue pair
         debug!(
@@ -118,26 +116,14 @@ impl PlanTestRunner {
         let mut qp_connections = Vec::new();
 
         for (i, qp) in worker_context.queue_pairs.iter_mut().enumerate() {
-            // Create local destination info
-            let local_psn = random::generate_psn();
-            let local_data = crate::connection::exchange::DestinationInfo {
-                qp_number: qp.qp_number(),
-                psn: local_psn,
-                lid: 0, // Will be filled by session
-                gid: local_gid,
-                gid_index: gid_index,
-                gid_type: gid_type,
-                mtu: self.plan.mtu(),
-            };
-
             // Setup the QP
             let remote_data = session.setup_queue_pair(qp)?;
             remote_gid = remote_data.gid;
 
             // Store QP connection details for display
             qp_connections.push(crate::connection::exchange::QueuePairConnection {
-                local_qpn: local_data.qp_number,
-                local_psn: local_data.psn,
+                local_qpn: qp.qp_number(),
+                local_psn: random::generate_psn(),
                 remote_qpn: remote_data.qp_number,
                 remote_psn: remote_data.psn,
             });
@@ -150,7 +136,7 @@ impl PlanTestRunner {
             }
 
             info!(
-                local_qpn = local_data.qp_number,
+                local_qpn = qp.qp_number(),
                 remote_qpn = remote_data.qp_number,
                 remote_psn = format!("0x{:x}", remote_data.psn),
                 "QP #{i} setup complete.",
@@ -172,6 +158,11 @@ impl PlanTestRunner {
         };
 
         session.synchronize_qps()?;
+
+        // Get connection data for display
+        let _connection_data = session.connection_data();
+        let gid_entry = worker.device.query_gid_ex(1, gid_index as u32)?;
+        let gid_type = gid_entry.gid_type();
 
         Ok((
             ConnectionSetupResult {
@@ -227,7 +218,18 @@ impl PlanTestRunner {
 
         // Use separate callbacks for latency and bandwidth tests
         if is_latency && tx_depth == 1 {
-            self.execute_latency_test(worker, worker_context, msg_size, remote_mr, histogram, &clock, &cq, start_time, &mut min_latency_ns, &mut max_latency_ns)?;
+            self.execute_latency_test(
+                worker,
+                worker_context,
+                msg_size,
+                remote_mr,
+                histogram,
+                &clock,
+                &cq,
+                start_time,
+                &mut min_latency_ns,
+                &mut max_latency_ns,
+            )?;
         } else {
             self.execute_bandwidth_test(worker, worker_context, msg_size, remote_mr, &cq)?;
         }
@@ -488,7 +490,8 @@ impl PlanTestRunner {
             }
 
             // Calculate how many operations this QP can actually post
-            let qp_inflight = worker_context.qp_send_counts[qp_idx] - worker_context.qp_completion_counts[qp_idx];
+            let qp_inflight =
+                worker_context.qp_send_counts[qp_idx] - worker_context.qp_completion_counts[qp_idx];
             let qp_available_slots = tx_depth - qp_inflight;
             let actual_post_list = post_list.min(qp_available_slots as usize);
 
@@ -652,7 +655,7 @@ impl PlanTestRunner {
                 shared_mr.lkey(),                      // Just pass the lkey
                 shared_memory.get_handle() as *mut u8, // Base pointer for address calculation
                 increment_size,                        // perftest INC value for this worker
-                qp_offset,                            // perftest-style QP offset calculation
+                qp_offset,                             // perftest-style QP offset calculation
                 self.plan.clone(),
                 thread_id,
                 tx_depth,
@@ -686,7 +689,10 @@ impl PlanTestRunner {
         if self.plan.needs_receive_buffers() {
             if let Some(rx_depth) = self.plan.rx_depth() {
                 let initial_rx_buffers = rx_depth; // Start with fewer buffers
-                info!("Posting {} receive buffers for SEND operations (max_msg_size={})", initial_rx_buffers, max_msg_size);
+                info!(
+                    "Posting {} receive buffers for SEND operations (max_msg_size={})",
+                    initial_rx_buffers, max_msg_size
+                );
                 worker_context.post_receive_buffers(worker, initial_rx_buffers, max_msg_size)?;
                 info!("Successfully posted receive buffers");
             }

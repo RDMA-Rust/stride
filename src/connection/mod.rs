@@ -2,6 +2,7 @@ pub mod exchange;
 pub mod manager;
 pub mod message;
 pub mod session;
+pub mod threaded;
 pub mod types;
 
 use self::message::{DeserializeMessage, Message};
@@ -42,6 +43,46 @@ pub type ConnectionResult<T> = Result<T, ConnectionError>;
 pub enum EndpointRole {
     Server,
     Client,
+}
+
+/// Type of connection to establish
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionType {
+    /// TCP connection (for out-of-band communication)
+    Tcp,
+    /// RDMA Connection Manager (future implementation)
+    RdmaCm,
+}
+
+impl ConnectionType {
+    /// Convert to string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConnectionType::Tcp => "tcp",
+            ConnectionType::RdmaCm => "rdmacm",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for ConnectionType {
+    type Err = ConnectionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "tcp" => Ok(ConnectionType::Tcp),
+            "rdmacm" | "rdma_cm" | "rdma-cm" => Ok(ConnectionType::RdmaCm),
+            _ => Err(ConnectionError::InvalidConfiguration(format!(
+                "Unknown connection type: '{}'",
+                s
+            ))),
+        }
+    }
 }
 
 /// Connection parameters
@@ -138,18 +179,14 @@ pub struct ConnectionFactory;
 
 impl ConnectionFactory {
     pub fn create(
-        conn_type: &str,
+        conn_type: ConnectionType,
         params: ConnectionParams,
     ) -> ConnectionResult<Box<dyn ConnectionManager>> {
-        match conn_type.to_lowercase().as_str() {
-            "tcp" => Ok(Box::new(manager::tcp::TcpConnectionManager::new(params))),
-            "rdmacm" => Err(ConnectionError::InvalidConfiguration(
+        match conn_type {
+            ConnectionType::Tcp => Ok(Box::new(manager::tcp::TcpConnectionManager::new(params))),
+            ConnectionType::RdmaCm => Err(ConnectionError::InvalidConfiguration(
                 "RDMA CM not implemented yet".to_string(),
             )),
-            _ => Err(ConnectionError::InvalidConfiguration(format!(
-                "Unknown connection type: {}",
-                conn_type
-            ))),
         }
     }
 }
