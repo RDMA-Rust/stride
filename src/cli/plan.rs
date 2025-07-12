@@ -108,6 +108,15 @@ impl Plan {
         matches!(self.operation(), Operation::Write | Operation::Read)
     }
 
+    pub fn needs_receive_buffers(&self) -> bool {
+        match self.operation() {
+            Operation::Send => true, // SEND always needs receive buffers
+            Operation::Write => self.uses_immediate_data(), // WRITE-with-imm needs receive buffers
+            Operation::Read => false, // READ never needs receive buffers
+            _ => false,
+        }
+    }
+
     pub fn test_name(&self) -> &'static str {
         match (self.operation(), self.base().mode) {
             (Operation::Send, Mode::Bandwidth) => "SEND bw",

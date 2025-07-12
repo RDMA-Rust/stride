@@ -344,7 +344,21 @@ impl PlanTestRunner {
         worker_context: &mut WorkerContext,
         clock: &Clock,
     ) -> Result<()> {
+        let timeout_sec = 120;
+        let timeout = Duration::from_secs(timeout_sec);
+        let deadline = std::time::Instant::now() + timeout;
+
         loop {
+            // Check for timeout
+            if std::time::Instant::now() > deadline {
+                return Err(anyhow::anyhow!(
+                    "Timeout waiting for completion after {timeout_sec} seconds. Inflight: {}, Completed: {}/{}",
+                    worker_context.inflight_requests,
+                    worker_context.completed_requests,
+                    worker_context.total_requests
+                ));
+            }
+
             // Proper CQ polling pattern following main.rs example
             match cq.borrow_mut().start_poll() {
                 Ok(mut poller) => {
@@ -367,11 +381,14 @@ impl PlanTestRunner {
                         *min_latency_ns = (*min_latency_ns).min(latency_ns);
                         *max_latency_ns = (*max_latency_ns).max(latency_ns);
 
-                        worker_context.record_request_completed();
+                        // For latency tests, we typically use QP 0, so record completion on QP 0
+                        worker_context.record_qp_requests_completed(0, 1);
                         return Ok(());
                     }
                 }
-                Err(_) => continue,
+                Err(_) => {
+                    continue;
+                }
             }
         }
     }
@@ -384,14 +401,14 @@ impl PlanTestRunner {
         worker_context: &mut WorkerContext,
     ) -> Result<bool> {
         let cqe_poll_limit = self.plan.poll_batch(); // Respect user-configured batch size
-        
+
         // Proper CQ polling pattern - poll up to cqe_poll_limit completions to prevent bubbles
         match cq.borrow_mut().start_poll() {
             Ok(mut poller) => {
                 // PERFORMANCE CRITICAL: Batch completion counting with per-QP tracking
                 let mut completed_count = 0u32;
                 let mut qp_completion_counts = vec![0u32; worker_context.queue_pair_count()];
-                
+
                 // Poll up to cqe_poll_limit completions to maintain posting/polling balance
                 // This prevents pipeline bubbles when completions arrive very fast
                 while completed_count < cqe_poll_limit {
@@ -417,7 +434,7 @@ impl PlanTestRunner {
                         break;
                     }
                 }
-                
+
                 // Batch update: update per-QP completion counts (perftest-style ccnt tracking)
                 if completed_count > 0 {
                     for (qp_idx, qp_completions) in qp_completion_counts.iter().enumerate() {
@@ -469,27 +486,27 @@ impl PlanTestRunner {
             if !worker_context.can_qp_post_request(qp_idx, tx_depth) {
                 continue; // Skip this QP if it's at tx_depth limit
             }
-            
+
             // Calculate how many operations this QP can actually post
             let qp_inflight = worker_context.qp_send_counts[qp_idx] - worker_context.qp_completion_counts[qp_idx];
             let qp_available_slots = tx_depth - qp_inflight;
             let actual_post_list = post_list.min(qp_available_slots as usize);
-            
+
             if actual_post_list == 0 {
                 continue; // No slots available for this QP
             }
-            
+
             // Pre-calculate base values for this QP's operations
             let qp_operation_base = worker_context.qp_send_counts[qp_idx];
 
             // Pre-calculate all addresses before mutable borrow to avoid borrow conflicts
             let tx_depth_usize = tx_depth as usize;
             let qp_base_index = qp_idx * tx_depth_usize;
-            
+
             // Extract raw pointers to address arrays before mutable borrow
             let local_addrs_ptr = worker_context.qp_buffer_addrs.as_ptr();
             let remote_addrs_ptr = worker_context.qp_remote_addrs.as_ptr();
-            
+
             // Get QP (unchecked for performance)
             // SAFETY: qp_idx < qp_count, which is the number of QPs we created
             let qp = unsafe { worker_context.get_queue_pair_mut_unchecked(qp_idx) };
@@ -506,7 +523,7 @@ impl PlanTestRunner {
                 // PERFORMANCE CRITICAL: Direct flat index calculation for maximum performance
                 let operation_within_qp = (qp_operation_base + i as u32) & tx_depth_mask;
                 let flat_index = qp_base_index + operation_within_qp as usize;
-                
+
                 // Get addresses directly from flattened arrays using raw pointers
                 let local_addr = unsafe { *local_addrs_ptr.add(flat_index) };
 
@@ -530,7 +547,7 @@ impl PlanTestRunner {
 
             // Post all operations for this QP
             guard.post()?;
-            
+
             // Update per-QP counters (perftest-style scnt tracking)
             worker_context.record_qp_requests_posted(qp_idx, actual_post_list as u32);
         }
@@ -576,7 +593,7 @@ impl PlanTestRunner {
         // Calculate buffer size following perftest BUFF_SIZE and INC patterns exactly
         const CYCLE_BUFFER_SIZE: usize = 4096; // perftest cycle_buffer
         const CACHE_LINE_SIZE: usize = 64; // Standard cache line size
-        
+
         // perftest BUFF_SIZE macro: ensure minimum cycle buffer size for small messages
         let buff_size = if max_msg_size < CYCLE_BUFFER_SIZE as u32 {
             CYCLE_BUFFER_SIZE
@@ -628,7 +645,7 @@ impl PlanTestRunner {
             // perftest QP offset calculation: each QP gets increment * 2 space
             // This ensures proper spacing for both send and receive buffers per QP
             let qp_offset = thread_id * increment_size * 2;
-            
+
             let worker = Worker::new_with_shared_memory(
                 ctx.clone(),
                 pd.clone(),
@@ -664,6 +681,16 @@ impl PlanTestRunner {
 
         // Update pre-calculated remote addresses now that we have remote MR info
         worker_context.update_remote_addresses(conn_result.remote_mr.addr);
+
+        // For SEND operations, post receive buffers on both client and server
+        if self.plan.needs_receive_buffers() {
+            if let Some(rx_depth) = self.plan.rx_depth() {
+                let initial_rx_buffers = rx_depth; // Start with fewer buffers
+                info!("Posting {} receive buffers for SEND operations (max_msg_size={})", initial_rx_buffers, max_msg_size);
+                worker_context.post_receive_buffers(worker, initial_rx_buffers, max_msg_size)?;
+                info!("Successfully posted receive buffers");
+            }
+        }
 
         // Create display output for results
         let config = TestConfiguration {

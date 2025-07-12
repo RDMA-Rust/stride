@@ -407,6 +407,42 @@ impl<'a> WorkerContext<'a> {
         }
     }
 
+    /// Post receive buffers for SEND operations (both client and server need this)
+    pub fn post_receive_buffers(&mut self, worker: &Worker<'a>, rx_depth: u32, msg_size: u32) -> anyhow::Result<()> {
+        use sideway::ibverbs::queue_pair::{QueuePair, WorkRequestFlags, SetScatterGatherEntry};
+        
+        for qp_idx in 0..self.queue_pair_count() {
+            // Get QP (unchecked for performance)
+            // SAFETY: qp_idx < queue_pair_count(), which is the number of QPs we created
+            let qp = unsafe { self.get_queue_pair_mut_unchecked(qp_idx) };
+
+            // Start post receive guard
+            let mut guard = qp.start_post_recv();
+
+            // Post rx_depth receive buffers for this QP
+            for recv_idx in 0..rx_depth {
+                // Use receive buffer area (second half of the memory region)
+                // Each QP gets increment_size * 2 space: first half for send, second half for receive
+                let send_addr = worker.calculate_operation_addr(recv_idx, msg_size);
+                let recv_addr = send_addr + worker.increment_size as u64; // Add increment_size to get receive buffer area
+                let wr_id = (qp_idx as u64) << 32 | recv_idx as u64;
+
+                // Create receive work request
+                let recv_handle = guard.construct_wr(wr_id);
+                
+                // Setup scatter-gather entry for receive buffer
+                unsafe {
+                    recv_handle.setup_sge(worker.lkey(), recv_addr, msg_size);
+                }
+            }
+
+            // Post all receive buffers for this QP
+            guard.post().map_err(|e| anyhow::anyhow!("Failed to post receive buffers: {}", e))?;
+        }
+
+        Ok(())
+    }
+
     /// Get pre-calculated local address for QP and operation index (hot path optimized)
     #[inline(always)]
     pub fn get_local_addr(&self, qp_idx: usize, operation_index: u32) -> u64 {
