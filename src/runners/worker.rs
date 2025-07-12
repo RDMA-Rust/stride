@@ -258,7 +258,7 @@ impl<'a> WorkerContext<'a> {
         );
 
         // Pre-calculate buffer addresses for this QP to avoid hot-path calculations
-        
+
         // Reserve space for this QP's addresses in the flattened vectors
         let tx_depth = worker.tx_depth as usize;
         self.qp_buffer_addrs.reserve(tx_depth);

@@ -76,6 +76,7 @@ pub struct TestConfiguration {
     pub tx_depth: u32,
     pub post_list: u32,
     pub test_type: TestType,
+    pub uses_immediate_data: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,17 +122,31 @@ pub struct QueuePairDetail {
 
 impl TestConfiguration {
     fn to_config_fields(&self) -> Vec<ConfigField> {
-        vec![
+        let mut fields = vec![
             ConfigField::new("Device", &self.device),
             ConfigField::new("Transport", &self.transport),
             ConfigField::new("QP Count", self.qp_count),
             ConfigField::new("Connection Type", &self.connection_type),
             ConfigField::new("MTU", self.mtu),
             ConfigField::new("GID Type", &self.gid_type),
-            ConfigField::new("Rx Depth", self.rx_depth),
-            ConfigField::new("Tx Depth", self.tx_depth),
-            ConfigField::new("Post List", self.post_list),
-        ]
+        ];
+
+        // Only include Rx Depth for operations that use receive queues
+        // Send operations always need Rx Depth, Write operations only if using immediate data
+        let needs_rx = match self.test_type {
+            TestType::SendLatency | TestType::SendBandwidth => true,
+            TestType::WriteLatency | TestType::WriteBandwidth => self.uses_immediate_data,
+            TestType::ReadLatency | TestType::ReadBandwidth => false,
+        };
+
+        if needs_rx {
+            fields.push(ConfigField::new("Rx Depth", self.rx_depth));
+        }
+
+        fields.push(ConfigField::new("Tx Depth", self.tx_depth));
+        fields.push(ConfigField::new("Post List", self.post_list));
+
+        fields
     }
 }
 

@@ -100,6 +100,9 @@ pub struct WriteOpts {
     /// Use write-with-immediate verb instead of write
     #[arg(long)]
     pub imm_data: bool,
+    /// Size of Rx queue (only valid with --imm-data)
+    #[arg(long, default_value_t = 512)]
+    pub rx_depth: u32,
 }
 
 #[derive(Subcommand)]
@@ -195,22 +198,42 @@ impl TryFrom<Cli> for Plan {
                 None,
                 None,
             ),
-            PerfCommands::Write(WriteCommands::Bandwidth(opts)) => (
-                Operation::Write,
-                Mode::Bandwidth,
-                opts.common,
-                None,
-                Some(opts.imm_data),
-                None,
-            ),
-            PerfCommands::Write(WriteCommands::Latency(opts)) => (
-                Operation::Write,
-                Mode::Latency,
-                opts.common,
-                None,
-                Some(opts.imm_data),
-                None,
-            ),
+            PerfCommands::Write(WriteCommands::Bandwidth(opts)) => {
+                // Validate rx_depth usage
+                if opts.rx_depth != 512 && !opts.imm_data {
+                    return Err(anyhow::anyhow!(
+                        "Error: --rx-depth can only be used with --imm-data for write operations.\n\
+                         Regular write operations don't use receive queues.\n\
+                         Use: stride-perf write bw --imm-data --rx-depth {}", opts.rx_depth
+                    ));
+                }
+                (
+                    Operation::Write,
+                    Mode::Bandwidth,
+                    opts.common,
+                    None,
+                    Some((opts.imm_data, opts.rx_depth)),
+                    None,
+                )
+            }
+            PerfCommands::Write(WriteCommands::Latency(opts)) => {
+                // Validate rx_depth usage
+                if opts.rx_depth != 512 && !opts.imm_data {
+                    return Err(anyhow::anyhow!(
+                        "Error: --rx-depth can only be used with --imm-data for write operations.\n\
+                         Regular write operations don't use receive queues.\n\
+                         Use: stride-perf write lat --imm-data --rx-depth {}", opts.rx_depth
+                    ));
+                }
+                (
+                    Operation::Write,
+                    Mode::Latency,
+                    opts.common,
+                    None,
+                    Some((opts.imm_data, opts.rx_depth)),
+                    None,
+                )
+            }
             PerfCommands::Read(ReadCommands::Bandwidth(opts)) => (
                 Operation::Read,
                 Mode::Bandwidth,
@@ -297,10 +320,11 @@ impl TryFrom<Cli> for Plan {
                 })
             }
             Operation::Write => {
-                let imm_data = write_opts.unwrap();
+                let (imm_data, rx_depth) = write_opts.unwrap();
                 Plan::Write(WritePlan {
                     base,
                     imm_data,
+                    rx_depth,
                     remote_mr: None, // Set during connection setup
                 })
             }

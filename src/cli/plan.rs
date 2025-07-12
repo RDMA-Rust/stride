@@ -55,6 +55,7 @@ pub struct SendPlan {
 pub struct WritePlan {
     pub base: PlanBase,
     pub imm_data: bool,
+    pub rx_depth: u32,
     pub remote_mr: Option<MemoryRegionInfo>,
 }
 
@@ -123,7 +124,14 @@ impl Plan {
     pub fn rx_depth(&self) -> Option<u32> {
         match self {
             Plan::Send(p) => Some(p.rx_depth),
-            _ => None, // WRITE and read don't need rx_depth
+            Plan::Write(p) => {
+                if p.imm_data {
+                    Some(p.rx_depth)
+                } else {
+                    None
+                }
+            }
+            Plan::Read(_) => None, // READ doesn't need rx_depth
         }
     }
 

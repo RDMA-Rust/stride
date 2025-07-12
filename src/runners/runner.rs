@@ -673,10 +673,11 @@ impl PlanTestRunner {
             connection_type: "RC".to_string(),
             mtu: conn_result.actual_mtu,
             gid_type: format!("{:?}", conn_result.gid_type),
-            rx_depth: 512,
+            rx_depth: self.plan.rx_depth().unwrap_or(512),
             tx_depth,
             post_list: self.plan.base().post_list,
             test_type,
+            uses_immediate_data: self.plan.uses_immediate_data(),
         };
 
         let qp_details: Vec<QueuePairDetail> = conn_result
