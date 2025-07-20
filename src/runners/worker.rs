@@ -197,19 +197,22 @@ impl<'a> Worker<'a> {
 impl<'a> WorkerContext<'a> {
     /// Create a new worker context using unsafe code to handle self-referential lifetimes
     /// This follows the pattern you suggested with Rc<RefCell<>> for the completion queue
-    pub fn new(worker: &'a Worker<'a>, _plan: &Plan, total_requests: u32) -> Result<Self> {
+    pub fn new(worker: &'a Worker<'a>, _plan: &Plan, total_requests: u32, qp_count: usize) -> Result<Self> {
         info!(
             thread_id = worker.thread_id,
             total_requests = total_requests,
+            qp_count = qp_count,
             "Creating worker context"
         );
 
         // Create the completion queue using the worker's device
+        let cqe_size = worker.tx_depth * qp_count as u32;
+
         let cq = worker
             .device
             .create_cq_builder()
             .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
-            .setup_cqe(worker.tx_depth * 2) // Extra space for safety
+            .setup_cqe(cqe_size)
             .build_ex()
             .map_err(|e| anyhow::anyhow!("Failed to create CQ: {}", e))?;
 

@@ -383,8 +383,10 @@ impl PlanTestRunner {
                         *min_latency_ns = (*min_latency_ns).min(latency_ns);
                         *max_latency_ns = (*max_latency_ns).max(latency_ns);
 
-                        // For latency tests, we typically use QP 0, so record completion on QP 0
-                        worker_context.record_qp_requests_completed(0, 1);
+                        // Extract actual QP index from wr_id
+                        // wr_id format: [thread_id:32][qp_idx:16][op_index:16]
+                        let qp_idx = ((wc.wr_id() >> 16) & 0xFFFF) as usize;
+                        worker_context.record_qp_requests_completed(qp_idx, 1);
                         return Ok(());
                     }
                 }
@@ -425,10 +427,9 @@ impl PlanTestRunner {
                             ));
                         }
 
-                        // Extract QP index from wr_id (we can derive it from completion queue)
-                        // For now, distribute completions evenly across QPs
-                        // TODO: Extract actual QP index from wr_id if needed
-                        let qp_idx = (completed_count as usize) % worker_context.queue_pair_count();
+                        // Extract actual QP index from wr_id
+                        // wr_id format: [thread_id:32][qp_idx:16][op_index:16]
+                        let qp_idx = ((wc.wr_id() >> 16) & 0xFFFF) as usize;
                         qp_completion_counts[qp_idx] += 1;
                         completed_count += 1;
                     } else {
@@ -521,7 +522,11 @@ impl PlanTestRunner {
             for i in 0..actual_post_list {
                 // Global index for wr_id tracking (includes QP information)
                 let global_op_index = qp_operation_base + i as u32;
-                let wr_id = thread_id_shifted | (global_op_index as u64);
+                // Encode QP index in wr_id for proper completion tracking
+                // Format: [thread_id:32][qp_idx:16][op_index:16]
+                let wr_id = thread_id_shifted
+                    | ((qp_idx as u64) << 16)
+                    | (global_op_index & 0xFFFF) as u64;
 
                 // PERFORMANCE CRITICAL: Direct flat index calculation for maximum performance
                 let operation_within_qp = (qp_operation_base + i as u32) & tx_depth_mask;
@@ -671,7 +676,7 @@ impl PlanTestRunner {
         // For now, we'll run single-threaded with the first worker
         // TODO: Implement multi-threaded execution later
         let worker = &workers[0];
-        let mut worker_context = WorkerContext::new(worker, &self.plan, iterations)?;
+        let mut worker_context = WorkerContext::new(worker, &self.plan, iterations, qp_count)?;
 
         // Add queue pairs to the worker context
         for _ in 0..qp_count {
