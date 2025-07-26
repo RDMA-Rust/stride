@@ -255,7 +255,7 @@ impl SendOperationExecutor {
 
             // Post initial receive buffers for this QP
             for recv_idx in 0..buffers_to_post {
-                let recv_addr = worker.calculate_operation_addr(recv_idx, msg_size);
+                let recv_addr = worker.calculate_operation_addr(qp_idx, msg_size);
                 let recv_addr = recv_addr + worker.increment_size as u64; // Separate receive area
                 let wr_id = (qp_idx as u64) << 32 | recv_idx as u64;
 
@@ -328,7 +328,12 @@ impl SendOperationExecutor {
 
             // Calculate how many operations this QP can actually send
             let available_credits = self.flow_control.available_send_credits(qp_idx) as usize;
-            let actual_post_list = post_list.min(available_credits);
+            let remain_iterations = worker_context.iterations * worker_context.round
+                - worker_context.qp_send_counts[qp_idx];
+
+            let actual_post_list = post_list
+                .min(available_credits)
+                .min(remain_iterations as usize);
 
             if actual_post_list == 0 {
                 debug!(qp_idx = qp_idx, "Skipping QP - actual_post_list is 0");
@@ -368,7 +373,7 @@ impl SendOperationExecutor {
 
                 // Calculate local address for this operation
                 let operation_index = (qp_operation_base + i as u32) % tx_depth;
-                let local_addr = worker.calculate_operation_addr(operation_index, msg_size);
+                let local_addr = worker.calculate_operation_addr(qp_idx, msg_size);
 
                 // Create SEND work request (start with basic SEND, immediate data support to be added later)
                 let send_handle = guard
@@ -477,7 +482,7 @@ impl SendOperationExecutor {
                 // posted_recv_per_qp tracks ALL buffers ever posted for this QP (never reset)
                 // This ensures unique buffer addresses across message size transitions
                 let recv_buffer_offset = self.flow_control.posted_recv_per_qp[qp_idx] + recv_idx;
-                let recv_addr = worker.calculate_operation_addr(recv_buffer_offset, msg_size);
+                let recv_addr = worker.calculate_operation_addr(qp_idx, msg_size);
 
                 // Add offset to separate receive area from send area
                 let recv_addr = recv_addr + worker.increment_size as u64;
@@ -1019,6 +1024,7 @@ fn poll_send_completions(
             recv_completions = recv_completions,
             total_completed = worker_context.completed_requests,
             total_requests = worker_context.total_requests,
+            inflights = worker_context.inflight_requests,
             "Processed completions"
         );
     }

@@ -453,8 +453,6 @@ impl PlanTestRunner {
                     }
                 }
 
-                println!("{qp_completion_counts:?}");
-
                 // Batch update: update per-QP completion counts (perftest-style ccnt tracking)
                 if completed_count > 0 {
                     for (qp_idx, qp_completions) in qp_completion_counts.iter().enumerate() {

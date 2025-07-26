@@ -193,7 +193,7 @@ impl<'a> Worker<'a> {
 
     /// Calculate address for a specific operation following perftest pattern exactly
     #[inline(always)]
-    pub fn calculate_operation_addr(&self, operation_index: u32, _msg_size: u32) -> u64 {
+    pub fn calculate_operation_addr(&self, operation_index: usize, msg_size: u32) -> u64 {
         // PERFORMANCE CRITICAL: perftest-style address cycling for optimal cache behavior
 
         // perftest pattern: cycle within the worker's own memory space
@@ -202,7 +202,7 @@ impl<'a> Worker<'a> {
         // Each operation gets a cache-line aligned offset within this worker's space
         // Use smaller cycling to stay within worker boundaries
         let cycle_mask = 0x3F; // Cycle through 64 positions (4KB for 64-byte cache lines)
-        let addr_offset = ((operation_index as usize) & cycle_mask) * 64; // Cache line size
+        let addr_offset = (operation_index & cycle_mask) * 64; // Cache line size
         let final_addr_offset = self.worker_offset + addr_offset;
 
         unsafe { self.base_addr.add(final_addr_offset) as u64 }
@@ -218,7 +218,7 @@ impl<'a> Worker<'a> {
         max_msg_size: u32,
     ) -> u64 {
         // Use the standard address calculation but adjust for message size efficiency
-        let base_addr = self.calculate_operation_addr(operation_index, msg_size);
+        let base_addr = self.calculate_operation_addr(operation_index as usize, msg_size);
 
         // For messages smaller than max size, we can optimize memory usage
         // by using only the portion of memory we actually need
@@ -380,7 +380,7 @@ impl<'a> WorkerContext<'a> {
 
         for op_idx in 0..worker.tx_depth {
             // Pre-calculate local address for this operation index
-            let local_addr = worker.calculate_operation_addr(op_idx, 0); // msg_size not needed for addr calc
+            let local_addr = worker.calculate_operation_addr(self.queue_pairs.len(), 0); // msg_size not needed for addr calc
             self.qp_buffer_addrs.push(local_addr);
 
             // Pre-calculate remote address offset (will be updated with actual remote_mr later)
@@ -448,7 +448,7 @@ impl<'a> WorkerContext<'a> {
     /// Record that multiple requests were completed (batch version for performance)
     #[inline(always)]
     pub fn record_requests_completed(&mut self, count: u32) {
-        self.inflight_requests -= count;
+        self.inflight_requests = self.inflight_requests.saturating_sub(count);
         self.completed_requests += count;
         // Removed debug logging from hot path for performance
     }
@@ -464,8 +464,8 @@ impl<'a> WorkerContext<'a> {
     #[inline(always)]
     pub fn record_qp_requests_completed(&mut self, qp_idx: usize, count: u32) {
         self.qp_completion_counts[qp_idx] += count;
-        self.inflight_requests = self.inflight_requests.saturating_sub(count);
         self.completed_requests += count;
+        self.inflight_requests = self.inflight_requests.saturating_sub(count);
     }
 
     /// Get progress as a percentage
@@ -552,7 +552,7 @@ impl<'a> WorkerContext<'a> {
             for recv_idx in 0..rx_depth {
                 // Use receive buffer area (second half of the memory region)
                 // Each QP gets increment_size * 2 space: first half for send, second half for receive
-                let send_addr = worker.calculate_operation_addr(recv_idx, msg_size);
+                let send_addr = worker.calculate_operation_addr(qp_idx, msg_size);
                 let recv_addr = send_addr + worker.increment_size as u64; // Add increment_size to get receive buffer area
                 let wr_id = (qp_idx as u64) << 32 | recv_idx as u64;
 
