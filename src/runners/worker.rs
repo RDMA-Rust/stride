@@ -13,6 +13,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+/// Calculate effective depth based on configured depth and total iterations
+/// This prevents over-allocation when iteration count is smaller than configured depths
+pub fn calculate_effective_depth(configured_depth: u32, total_iterations: u32) -> u32 {
+    configured_depth.min(total_iterations).max(1) // Ensure at least 1
+}
+
 /// Worker that owns all RDMA resources needed for independent operation
 /// This is the parent struct that has stable addresses for borrowing
 pub struct Worker<'a> {
@@ -40,6 +46,8 @@ pub struct Worker<'a> {
     pub worker_offset: usize,  // Offset within shared buffer for this worker
     /// Memory region handle for shared memory workers
     pub lkey: u32, // Local key for RDMA operations
+    /// Maximum message size this worker can handle (for memory efficiency)
+    pub max_msg_size: u32,
 }
 
 /// Worker context that contains all resources needed for a thread worker
@@ -50,8 +58,10 @@ pub struct Worker<'a> {
 pub struct WorkerContext<'a> {
     /// Queue pairs owned by this worker
     pub queue_pairs: Vec<GenericQueuePair<'a>>,
-    /// Completion queue wrapped in Rc<RefCell<>> for safe sharing
-    pub completion_queue: Rc<RefCell<ExtendedCompletionQueue<'a>>>,
+    /// Send completion queue wrapped in Rc<RefCell<>> for safe sharing
+    pub send_completion_queue: Rc<RefCell<ExtendedCompletionQueue<'a>>>,
+    /// Receive completion queue wrapped in Rc<RefCell<>> for safe sharing (for SEND operations)
+    pub recv_completion_queue: Option<Rc<RefCell<ExtendedCompletionQueue<'a>>>>,
     /// Pre-calculated local buffer addresses flattened for cache efficiency
     /// Format: qp_buffer_addrs[qp_idx * tx_depth + operation_index] = local_addr
     pub qp_buffer_addrs: Vec<u64>,
@@ -70,6 +80,8 @@ pub struct WorkerContext<'a> {
     pub completed_requests: u32,
     /// Number of requests currently in flight (global)
     pub inflight_requests: u32,
+    pub iterations: u32,
+    pub round: u32,
 }
 
 impl<'a> Worker<'a> {
@@ -84,9 +96,23 @@ impl<'a> Worker<'a> {
         tx_depth: u32,
         rx_depth: Option<u32>,
     ) -> Self {
+        // Calculate effective depths based on plan iterations
+        let total_iterations = plan.base().iters;
+        let effective_tx_depth = calculate_effective_depth(tx_depth, total_iterations);
+        let effective_rx_depth =
+            rx_depth.map(|depth| calculate_effective_depth(depth, total_iterations));
+
+        // Calculate maximum message size from plan
+        let max_msg_size = plan.base().msg_sizes.iter().max().copied().unwrap_or(65536);
+
         info!(
             thread_id = thread_id,
-            "Creating worker with dedicated memory"
+            configured_tx_depth = tx_depth,
+            effective_tx_depth = effective_tx_depth,
+            configured_rx_depth = rx_depth,
+            effective_rx_depth = effective_rx_depth,
+            total_iterations = total_iterations,
+            "Creating worker with dedicated memory and iteration-aware depths"
         );
 
         // Calculate base address and default increment for legacy compatibility
@@ -102,12 +128,13 @@ impl<'a> Worker<'a> {
             memory: Some(memory),
             plan,
             thread_id,
-            tx_depth,
-            rx_depth,
+            tx_depth: effective_tx_depth,
+            rx_depth: effective_rx_depth,
             base_addr,
             increment_size,
             worker_offset: 0,
             lkey,
+            max_msg_size,
         }
     }
 
@@ -124,12 +151,26 @@ impl<'a> Worker<'a> {
         tx_depth: u32,
         rx_depth: Option<u32>,
     ) -> Self {
+        // Calculate effective depths based on plan iterations
+        let total_iterations = plan.base().iters;
+        let effective_tx_depth = calculate_effective_depth(tx_depth, total_iterations);
+        let effective_rx_depth =
+            rx_depth.map(|depth| calculate_effective_depth(depth, total_iterations));
+
+        // Calculate maximum message size from plan
+        let max_msg_size = plan.base().msg_sizes.iter().max().copied().unwrap_or(65536);
+
         info!(
             thread_id = thread_id,
             worker_offset = worker_offset,
             increment_size = increment_size,
             lkey = lkey,
-            "Creating worker with shared memory"
+            configured_tx_depth = tx_depth,
+            effective_tx_depth = effective_tx_depth,
+            configured_rx_depth = rx_depth,
+            effective_rx_depth = effective_rx_depth,
+            total_iterations = total_iterations,
+            "Creating worker with shared memory and iteration-aware depths"
         );
 
         Self {
@@ -140,12 +181,13 @@ impl<'a> Worker<'a> {
             memory: None, // No individual memory ownership for shared workers
             plan,
             thread_id,
-            tx_depth,
-            rx_depth,
+            tx_depth: effective_tx_depth,
+            rx_depth: effective_rx_depth,
             base_addr,
             increment_size,
             worker_offset,
             lkey,
+            max_msg_size,
         }
     }
 
@@ -164,6 +206,33 @@ impl<'a> Worker<'a> {
         let final_addr_offset = self.worker_offset + addr_offset;
 
         unsafe { self.base_addr.add(final_addr_offset) as u64 }
+    }
+
+    /// Calculate message-size-aware address for incremental memory usage
+    /// This allows using different portions of reserved memory based on actual message size
+    #[inline(always)]
+    pub fn calculate_message_size_addr(
+        &self,
+        operation_index: u32,
+        msg_size: u32,
+        max_msg_size: u32,
+    ) -> u64 {
+        // Use the standard address calculation but adjust for message size efficiency
+        let base_addr = self.calculate_operation_addr(operation_index, msg_size);
+
+        // For messages smaller than max size, we can optimize memory usage
+        // by using only the portion of memory we actually need
+        if msg_size < max_msg_size && msg_size > 0 {
+            // Use incremental addressing: smaller messages use earlier portions of the buffer
+            // This improves cache locality for small message tests
+            let size_ratio = msg_size as f64 / max_msg_size as f64;
+            let addr_adjustment =
+                ((operation_index as usize % 16) as f64 * size_ratio) as usize * 64;
+            unsafe { self.base_addr.add(self.worker_offset + addr_adjustment) as u64 }
+        } else {
+            // For max-sized messages or when sizes are equal, use standard addressing
+            base_addr
+        }
     }
 
     /// Add an additional memory region
@@ -197,39 +266,73 @@ impl<'a> Worker<'a> {
 impl<'a> WorkerContext<'a> {
     /// Create a new worker context using unsafe code to handle self-referential lifetimes
     /// This follows the pattern you suggested with Rc<RefCell<>> for the completion queue
-    pub fn new(worker: &'a Worker<'a>, _plan: &Plan, total_requests: u32, qp_count: usize) -> Result<Self> {
+    pub fn new(
+        worker: &'a Worker<'a>,
+        plan: &Plan,
+        iterations: u32,
+        qp_count: usize,
+    ) -> Result<Self> {
         info!(
             thread_id = worker.thread_id,
-            total_requests = total_requests,
+            iterations = iterations,
             qp_count = qp_count,
             "Creating worker context"
         );
 
-        // Create the completion queue using the worker's device
-        let cqe_size = worker.tx_depth * qp_count as u32;
+        // Create the send completion queue using the worker's device
+        let send_cqe_size = worker.tx_depth * qp_count as u32;
 
-        let cq = worker
+        let send_cq = worker
             .device
             .create_cq_builder()
             .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
-            .setup_cqe(cqe_size)
+            .setup_cqe(send_cqe_size)
             .build_ex()
-            .map_err(|e| anyhow::anyhow!("Failed to create CQ: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create send CQ: {}", e))?;
 
-        // Wrap the CQ in Rc<RefCell<>> first
-        let cq_wrapped = Rc::new(RefCell::new(cq));
+        // Wrap the send CQ in Rc<RefCell<>>
+        let send_cq_wrapped = Rc::new(RefCell::new(send_cq));
+
+        // For SEND operations, create a separate receive completion queue
+        let recv_cq_wrapped = if matches!(plan, crate::cli::plan::Plan::Send(_)) {
+            let rx_depth = worker.rx_depth.unwrap_or(512);
+            let recv_cqe_size = rx_depth * qp_count as u32;
+
+            info!(
+                thread_id = worker.thread_id,
+                recv_cqe_size = recv_cqe_size,
+                rx_depth = rx_depth,
+                qp_count = qp_count,
+                "Creating separate receive CQ for SEND operations"
+            );
+
+            let recv_cq = worker
+                .device
+                .create_cq_builder()
+                .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
+                .setup_cqe(recv_cqe_size)
+                .build_ex()
+                .map_err(|e| anyhow::anyhow!("Failed to create recv CQ: {}", e))?;
+
+            Some(Rc::new(RefCell::new(recv_cq)))
+        } else {
+            None
+        };
 
         Ok(Self {
-            completion_queue: cq_wrapped,
+            send_completion_queue: send_cq_wrapped,
+            recv_completion_queue: recv_cq_wrapped,
             queue_pairs: Vec::new(),
             qp_buffer_addrs: Vec::new(),
             qp_remote_addrs: Vec::new(),
             tx_depth: worker.tx_depth,
             qp_send_counts: Vec::new(),
             qp_completion_counts: Vec::new(),
-            total_requests,
+            total_requests: iterations * qp_count as u32,
             completed_requests: 0,
             inflight_requests: 0,
+            iterations,
+            round: 0,
         })
     }
 
@@ -238,15 +341,23 @@ impl<'a> WorkerContext<'a> {
         // Create the queue pair using the worker's protection domain
         // We need to use unsafe to get a raw reference that lives long enough
         let qp = unsafe {
-            let cq_ptr = self.completion_queue.as_ptr();
-            let cq_ref = &*cq_ptr;
+            let send_cq_ptr = self.send_completion_queue.as_ptr();
+            let send_cq_ref = &*send_cq_ptr;
+
+            // Use separate recv CQ for SEND operations, or reuse send CQ for WRITE/READ
+            let recv_cq_ref = if let Some(ref recv_cq) = self.recv_completion_queue {
+                let recv_cq_ptr = recv_cq.as_ptr();
+                &*recv_cq_ptr
+            } else {
+                send_cq_ref // Use same CQ for WRITE/READ operations
+            };
 
             worker
                 .pd
                 .create_qp_builder()
                 .setup_max_inline_data(256)
-                .setup_send_cq(cq_ref)
-                .setup_recv_cq(cq_ref)
+                .setup_send_cq(send_cq_ref)
+                .setup_recv_cq(recv_cq_ref)
                 .setup_max_send_wr(worker.tx_depth)
                 .setup_max_recv_wr(worker.rx_depth.unwrap_or(512))
                 .build_ex()
@@ -398,9 +509,19 @@ impl<'a> WorkerContext<'a> {
         self.queue_pairs.len()
     }
 
-    /// Get completion queue (for polling operations)
+    /// Get send completion queue (for polling operations)
     pub fn completion_queue(&self) -> &Rc<RefCell<ExtendedCompletionQueue<'a>>> {
-        &self.completion_queue
+        &self.send_completion_queue
+    }
+
+    /// Get send completion queue (explicit)
+    pub fn send_completion_queue(&self) -> &Rc<RefCell<ExtendedCompletionQueue<'a>>> {
+        &self.send_completion_queue
+    }
+
+    /// Get receive completion queue (for SEND operations)
+    pub fn recv_completion_queue(&self) -> Option<&Rc<RefCell<ExtendedCompletionQueue<'a>>>> {
+        self.recv_completion_queue.as_ref()
     }
 
     /// Update pre-calculated remote addresses with actual remote memory region base

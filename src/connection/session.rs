@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use sideway::ibverbs::address::Gid;
-use sideway::ibverbs::device::DeviceInfo;
 use sideway::ibverbs::device_context::{DeviceContext, Mtu};
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::{GenericQueuePair, QueuePair};
@@ -249,6 +248,40 @@ impl<'a> ConnectionSession<'a> {
     pub fn synchronize_qps(&mut self) -> ConnectionResult<()> {
         // For TCP connections, we don't need special QP synchronization
         // This is mainly for RDMA CM where we need to synchronize the connection state
+        Ok(())
+    }
+
+    /// Synchronize before each message size test in all-sizes mode
+    /// This ensures both client and server are ready before starting each message size
+    pub fn synchronize_message_size(&mut self, msg_size: u32) -> ConnectionResult<()> {
+        debug!(msg_size = msg_size, "Synchronizing for message size test");
+
+        // Use a simple approach: exchange a dummy DestinationInfo as a sync barrier
+        // This ensures both peers are at the same point before starting each message size test
+        let gid_entry = self
+            .ctx
+            .query_gid_ex(1, self.local_gid_index as u32)
+            .map_err(|e| {
+                ConnectionError::RdmaError(format!("Failed to query GID for sync: {:?}", e))
+            })?;
+
+        let sync_data = DestinationInfo {
+            lid: msg_size, // Use lid field as message size marker for sync
+            mtu: self.requested_mtu,
+            qp_number: msg_size, // Use qp_number field as additional sync marker
+            psn: msg_size,       // Use PSN field as message size marker for sync
+            gid: self.local_gid.unwrap_or_default(),
+            gid_type: gid_entry.gid_type(),
+            gid_index: self.local_gid_index,
+        };
+
+        // Exchange sync data - this acts as a barrier ensuring both peers are ready
+        let _remote_sync = self.manager.exchange_qp_info(sync_data)?;
+
+        debug!(
+            msg_size = msg_size,
+            "Message size synchronization completed"
+        );
         Ok(())
     }
 

@@ -4,8 +4,8 @@ use crate::connection::session::ConnectionSession;
 use crate::connection::{ConnectionParams, ConnectionType, EndpointRole};
 use crate::context::device::open_device_context;
 use crate::memory::{AlignedConfig, HugepageConfig, MemoryAllocator, MemoryType};
+use crate::operations::send;
 use crate::runners::worker::{Worker, WorkerContext, WorkerResult};
-use crate::transport::flow_context;
 use crate::utils::display::{
     BandwidthResult, DisplayOutput, LatencyResult, QueuePairDetail, TestConfiguration, TestType,
 };
@@ -35,31 +35,6 @@ pub struct PlanTestRunner {
 impl PlanTestRunner {
     pub fn new(plan: Plan) -> Self {
         Self { plan }
-    }
-
-    /// Setup flow control resources for credit-based flow control
-    fn setup_flow_control<'a, 'b>(
-        &self,
-        pd: &'b ProtectionDomain<'a>,
-        rx_depth: u32,
-    ) -> Result<Option<flow_context::FlowControlContext<'a>>>
-    where
-        'b: 'a,
-    {
-        // Only setup flow control if it's enabled
-        if !self.plan.uses_flow_control() {
-            return Ok(None);
-        }
-
-        info!("Setting up flow control with rx_depth={}", rx_depth);
-
-        // Create a flow control context that manages both sender and receiver
-        let mut fc_context = flow_context::FlowControlContext::new(rx_depth)?;
-
-        // Register memory regions for flow control
-        fc_context.register_mr(pd)?;
-
-        Ok(Some(fc_context))
     }
 
     /// Setup connection using the Worker interface
@@ -264,6 +239,24 @@ impl PlanTestRunner {
     ) -> Result<()> {
         let tx_depth = worker.tx_depth;
 
+        // Check if this is a SEND operation that needs special handling
+        if self.plan.operation() == crate::cli::plan::Operation::Send {
+            // Handle SEND operations with flow control
+            let rx_depth = self.plan.rx_depth().unwrap_or(512);
+            let use_immediate_data = self.plan.uses_immediate_data();
+
+            return send::execute_send_latency_test(
+                worker,
+                worker_context,
+                msg_size,
+                rx_depth,
+                use_immediate_data,
+                histogram,
+                clock,
+            );
+        }
+
+        // Handle other operations (WRITE, READ)
         while !worker_context.is_complete() {
             if worker_context.can_post_request(tx_depth) {
                 let operation_start_time = clock.now(); // Precise timing for single operation
@@ -309,27 +302,49 @@ impl PlanTestRunner {
         remote_mr: &crate::connection::exchange::MemoryRegionInfo,
         cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
     ) -> Result<()> {
-        let tx_depth = worker.tx_depth;
-
-        while !worker_context.is_complete() {
-            // Post operations if we can - distribute across multiple QPs
-            while worker_context.can_post_request(tx_depth) {
-                let post_list = self.plan.base().post_list.min(
-                    worker_context.total_requests
-                        - worker_context.completed_requests
-                        - worker_context.inflight_requests,
-                ) as usize;
-
-                if post_list == 0 {
-                    break;
-                }
-
-                // Use helper method to post operations
-                self.post_operations(worker, worker_context, post_list, msg_size, remote_mr)?;
+        // Check if this is a SEND operation that needs special handling
+        match self.plan {
+            Plan::Send(ref send_plan) => {
+                // Use SEND-specific bandwidth test with flow control
+                return send::execute_send_bandwidth_test(
+                    worker,
+                    worker_context,
+                    msg_size,
+                    send_plan.rx_depth,
+                    send_plan.imm_data,
+                );
             }
+            _ => {
+                // Handle WRITE/READ operations with the existing implementation
+                let tx_depth = worker.tx_depth;
 
-            // For bandwidth tests, poll completions in batches
-            self.poll_completions_once(cq, worker_context)?;
+                while !worker_context.is_complete() {
+                    // Post operations if we can - distribute across multiple QPs
+                    while worker_context.can_post_request(tx_depth) {
+                        let post_list = self.plan.base().post_list.min(
+                            worker_context.total_requests
+                                - worker_context.completed_requests
+                                - worker_context.inflight_requests,
+                        ) as usize;
+
+                        if post_list == 0 {
+                            break;
+                        }
+
+                        // Use helper method to post operations
+                        self.post_operations(
+                            worker,
+                            worker_context,
+                            post_list,
+                            msg_size,
+                            remote_mr,
+                        )?;
+                    }
+
+                    // For bandwidth tests, poll completions in batches
+                    self.poll_completions_once(cq, worker_context)?;
+                }
+            }
         }
         Ok(())
     }
@@ -438,6 +453,8 @@ impl PlanTestRunner {
                     }
                 }
 
+                println!("{qp_completion_counts:?}");
+
                 // Batch update: update per-QP completion counts (perftest-style ccnt tracking)
                 if completed_count > 0 {
                     for (qp_idx, qp_completions) in qp_completion_counts.iter().enumerate() {
@@ -524,9 +541,8 @@ impl PlanTestRunner {
                 let global_op_index = qp_operation_base + i as u32;
                 // Encode QP index in wr_id for proper completion tracking
                 // Format: [thread_id:32][qp_idx:16][op_index:16]
-                let wr_id = thread_id_shifted
-                    | ((qp_idx as u64) << 16)
-                    | (global_op_index & 0xFFFF) as u64;
+                let wr_id =
+                    thread_id_shifted | ((qp_idx as u64) << 16) | (global_op_index & 0xFFFF) as u64;
 
                 // PERFORMANCE CRITICAL: Direct flat index calculation for maximum performance
                 let operation_within_qp = (qp_operation_base + i as u32) & tx_depth_mask;
@@ -676,6 +692,7 @@ impl PlanTestRunner {
         // For now, we'll run single-threaded with the first worker
         // TODO: Implement multi-threaded execution later
         let worker = &workers[0];
+
         let mut worker_context = WorkerContext::new(worker, &self.plan, iterations, qp_count)?;
 
         // Add queue pairs to the worker context
@@ -690,18 +707,19 @@ impl PlanTestRunner {
         // Update pre-calculated remote addresses now that we have remote MR info
         worker_context.update_remote_addresses(conn_result.remote_mr.addr);
 
-        // For SEND operations, post receive buffers on both client and server
-        if self.plan.needs_receive_buffers() {
-            if let Some(rx_depth) = self.plan.rx_depth() {
-                let initial_rx_buffers = rx_depth; // Start with fewer buffers
-                info!(
-                    "Posting {} receive buffers for SEND operations (max_msg_size={})",
-                    initial_rx_buffers, max_msg_size
-                );
-                worker_context.post_receive_buffers(worker, initial_rx_buffers, max_msg_size)?;
-                info!("Successfully posted receive buffers");
-            }
-        }
+        // // For SEND operations, post receive buffers on both client and server
+        // if self.plan.needs_receive_buffers() {
+        //     if let Some(rx_depth) = self.plan.rx_depth() {
+        //         let initial_rx_buffers = rx_depth; // Start with fewer buffers
+        //         info!(
+        //             "Posting {} receive buffers for SEND operations (max_msg_size={})",
+        //             initial_rx_buffers, max_msg_size
+        //         );
+        //         worker_context.post_receive_buffers(worker, initial_rx_buffers, max_msg_size)?;
+
+        //         info!("Successfully posted receive buffers");
+        //     }
+        // }
 
         // Create display output for results
         let config = TestConfiguration {
@@ -783,9 +801,31 @@ impl PlanTestRunner {
                 "Running test with Worker architecture"
             );
 
+            worker_context.round += 1;
+
+            // For SEND operations, ensure server has receive buffers ready before sync
+            if matches!(self.plan, Plan::Send(_)) && is_server {
+                // This will be handled inside execute_worker for SEND operations
+                debug!(
+                    msg_size = msg_size,
+                    "Server will post initial receive buffers"
+                );
+            }
+
+            // Synchronize with remote peer before each message size test (all-sizes mode)
+            if msg_sizes.len() > 1 {
+                debug!(
+                    msg_size = msg_size,
+                    "Synchronizing before message size test"
+                );
+                session.synchronize_message_size(msg_size).map_err(|e| {
+                    anyhow::anyhow!("Failed to synchronize message size {}: {}", msg_size, e)
+                })?;
+            }
+
             let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
 
-            // Execute the test based on mode
+            // Execute the test based on mode and operation type
             let result = if is_bidirectional || !is_server {
                 // Execute traffic generation (both directions in bidir mode, or client-only in unidir mode)
                 self.execute_worker(
@@ -795,8 +835,17 @@ impl PlanTestRunner {
                     &conn_result.remote_mr,
                     &mut histogram,
                 )?
+            } else if matches!(self.plan, Plan::Send(_)) {
+                // SEND operations require active server participation (two-sided operations)
+                self.execute_worker(
+                    worker,
+                    &mut worker_context,
+                    msg_size,
+                    &conn_result.remote_mr,
+                    &mut histogram,
+                )?
             } else {
-                // Server-only mode: just wait and receive (no traffic generation)
+                // Server-only mode for one-sided operations (WRITE/READ): just wait and receive
                 self.execute_server_receive_only(&mut worker_context)?
             };
 
