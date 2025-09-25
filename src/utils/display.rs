@@ -377,8 +377,10 @@ impl DisplayOutput {
             required_width
         );
 
-        if let Err(e) = print_single_row_with_width(results, header_width) {
-            eprintln!("Error displaying bandwidth result: {}", e);
+        if self.output_config.tui_enabled {
+            if let Err(e) = print_single_row_with_width(results, header_width) {
+                eprintln!("Error displaying bandwidth result: {}", e);
+            }
         }
     }
 
@@ -392,8 +394,10 @@ impl DisplayOutput {
             required_width
         );
 
-        if let Err(e) = print_single_row_with_width(results, header_width) {
-            eprintln!("Error displaying latency result: {}", e);
+        if self.output_config.tui_enabled {
+            if let Err(e) = print_single_row_with_width(results, header_width) {
+                eprintln!("Error displaying latency result: {}", e);
+            }
         }
     }
 
@@ -401,32 +405,40 @@ impl DisplayOutput {
     pub fn init_bandwidth_streaming_table(
         &self,
         header_width: usize,
-    ) -> Result<TableFormatter, io::Error> {
+    ) -> Result<Option<TableFormatter>, io::Error> {
         tui_println!(
             self,
             "{}",
             create_header("Bandwidth Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
         );
 
-        let mut formatter = TableFormatter::with_total_width::<BandwidthResult>(header_width);
-        formatter.print_header()?;
-        Ok(formatter)
+        if self.output_config.tui_enabled {
+            let mut formatter = TableFormatter::with_total_width::<BandwidthResult>(header_width);
+            formatter.print_header()?;
+            Ok(Some(formatter))
+        } else {
+            Ok(None)
+        }
     }
 
     // Initialize streaming table headers for latency results
     pub fn init_latency_streaming_table(
         &self,
         header_width: usize,
-    ) -> Result<TableFormatter, io::Error> {
+    ) -> Result<Option<TableFormatter>, io::Error> {
         tui_println!(
             self,
             "{}",
             create_header("Latency Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
         );
 
-        let mut formatter = TableFormatter::with_total_width::<LatencyResult>(header_width);
-        formatter.print_header()?;
-        Ok(formatter)
+        if self.output_config.tui_enabled {
+            let mut formatter = TableFormatter::with_total_width::<LatencyResult>(header_width);
+            formatter.print_header()?;
+            Ok(Some(formatter))
+        } else {
+            Ok(None)
+        }
     }
 
     // Display only the headers and configuration, not the results tables
@@ -466,8 +478,10 @@ impl DisplayOutput {
             create_header("Bandwidth Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
         );
 
-        if let Err(e) = print_table_with_width(&self.bw_results_collection, header_width) {
-            eprintln!("Error displaying bandwidth results: {}", e);
+        if self.output_config.tui_enabled {
+            if let Err(e) = print_table_with_width(&self.bw_results_collection, header_width) {
+                eprintln!("Error displaying bandwidth results: {}", e);
+            }
         }
     }
 
@@ -483,8 +497,10 @@ impl DisplayOutput {
             create_header("Latency Results", header_width, DEFAULT_HEADER_MARGIN_LEN)
         );
 
-        if let Err(e) = print_table_with_width(&self.lat_results_collection, header_width) {
-            eprintln!("Error displaying latency results: {}", e);
+        if self.output_config.tui_enabled {
+            if let Err(e) = print_table_with_width(&self.lat_results_collection, header_width) {
+                eprintln!("Error displaying latency results: {}", e);
+            }
         }
     }
 

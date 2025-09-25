@@ -76,14 +76,23 @@ pub fn probe_devices(
         let attr = context.query_device()?;
         let info = DeviceDetail::from_device_attr(&attr);
 
+        let res = std::fs::read_to_string(format!(
+            "/sys/class/infiniband/{}/device/numa_node",
+            context.name()
+        ))
+        .unwrap_or("-1".to_string());
+        let res = res.trim();
+
         if tui_enabled {
-            println!("{}: {}", context.name(), info.description());
+            println!("{}: {}, NUMA {}", context.name(), info.description(), res);
         }
 
         if detailed {
             // Print detailed device information
             // ...
         }
+
+        let gid_table = context.query_gid_table().unwrap_or(Vec::new());
 
         for i in 1..=attr.phys_port_cnt() {
             let port_attr = context.query_port(i)?;
@@ -96,8 +105,18 @@ pub fn probe_devices(
                     port_attr.active_speed().to_throughput()
                         * ((port_attr.active_width() as u32) as f64)
                 );
+                for gid in gid_table.iter().filter(|gid| gid.port_num() == (i as u32)) {
+                    println!(
+                        "        Gid Index: {}, Gid Type: {:?}, Gid: {}",
+                        gid.gid_index(),
+                        gid.gid_type(),
+                        gid.gid()
+                    )
+                }
             }
         }
+
+        println!("");
     }
 
     Ok(())

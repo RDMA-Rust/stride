@@ -3,10 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::connection::exchange::{DestinationInfo, MemoryRegionInfo, TestResults};
-use crate::connection::{
-    ConnectionError, ConnectionManager, ConnectionParams, ConnectionResult, ConnectionType,
-    EndpointRole,
-};
+use crate::connection::{ConnectionError, ConnectionParams, ConnectionResult, ConnectionType};
 
 /// Message types for communication between main thread and connection thread
 #[derive(Debug)]

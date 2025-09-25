@@ -1,13 +1,16 @@
 use clap::Parser;
 use stride::cli::perf::Cli;
-use stride::cli::plan::execute;
+use stride::cli::plan::{execute, Plan};
 use tracing_subscriber::filter::LevelFilter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    // Configure tracing based on CLI flags
-    if cli.trace {
+    // Convert CLI to Plan first to get merged trace setting
+    let plan: Plan = cli.try_into()?;
+
+    // Configure tracing based on merged trace setting
+    if plan.base().output.trace_enabled {
         tracing_subscriber::fmt()
             .with_max_level(LevelFilter::TRACE)
             .init();
@@ -18,8 +21,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .init();
     }
 
-    // Convert CLI to Plan and execute
-    let plan = cli.try_into()?;
     execute(plan)?;
 
     Ok(())

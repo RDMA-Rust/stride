@@ -13,10 +13,8 @@ use crate::utils::random;
 use anyhow::Result;
 use byte_unit::Byte;
 use quanta::{Clock, Instant, IntoNanoseconds};
-use sideway::ibverbs::address::Gid;
 use sideway::ibverbs::completion::WorkCompletionStatus;
 use sideway::ibverbs::device::DeviceInfo;
-use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::{
     PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
 };
@@ -771,9 +769,9 @@ impl PlanTestRunner {
 
             // Initialize streaming table for received results
             if is_latency {
-                Some(display.init_latency_streaming_table(header_width)?)
+                display.init_latency_streaming_table(header_width)?
             } else {
-                Some(display.init_bandwidth_streaming_table(header_width)?)
+                display.init_bandwidth_streaming_table(header_width)?
             }
         } else {
             // Client mode or bidirectional mode: display headers and initialize table
@@ -786,9 +784,9 @@ impl PlanTestRunner {
 
             // Initialize streaming table for real-time results
             if is_latency {
-                Some(display.init_latency_streaming_table(header_width)?)
+                display.init_latency_streaming_table(header_width)?
             } else {
-                Some(display.init_bandwidth_streaming_table(header_width)?)
+                display.init_bandwidth_streaming_table(header_width)?
             }
         };
 

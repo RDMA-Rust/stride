@@ -538,7 +538,7 @@ impl<'a> WorkerContext<'a> {
         rx_depth: u32,
         msg_size: u32,
     ) -> anyhow::Result<()> {
-        use sideway::ibverbs::queue_pair::{QueuePair, SetScatterGatherEntry, WorkRequestFlags};
+        use sideway::ibverbs::queue_pair::{QueuePair, SetScatterGatherEntry};
 
         for qp_idx in 0..self.queue_pair_count() {
             // Get QP (unchecked for performance)

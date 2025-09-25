@@ -1,4 +1,3 @@
-use crate::connection::message;
 use crate::runners::worker::{Worker, WorkerContext};
 use anyhow::Result;
 use quanta::IntoNanoseconds;
@@ -89,7 +88,11 @@ impl SendFlowControl {
 
     /// Check if QP needs more receive buffers
     pub fn needs_recv_buffers(&self, qp_idx: usize) -> bool {
-        // debug!(qp_idx = qp_idx, recv_credits = self.recv_credits[qp_idx], rx_depth = self.rx_depth);
+        info!(
+            qp_idx = qp_idx,
+            recv_credits = self.recv_credits[qp_idx],
+            rx_depth = self.rx_depth
+        );
         self.recv_credits[qp_idx] < self.rx_depth // Always try to keep receive queue full
     }
 
@@ -776,11 +779,22 @@ pub fn execute_send_latency_test<'a>(
     }
 
     let cq = worker_context.completion_queue().clone();
-    // Server needs both SEND and RECV completions, client only needs SEND completions
+    // Determine how many completions we still need to observe before exiting the test loop.
+    //
+    //  * Client (unidirectional) waits for one SEND completion per request.
+    //  * Server (bidirectional) waits for both SEND **and** RECV completions per request (two total).
+    //  * Server (unidirectional) only waits for RECV completions because it never posts SENDs.
     let mut completions_needed = if worker.plan.base().server {
-        worker_context.total_requests * 2 // SEND + RECV completions
+        if worker.plan.base().bidir {
+            // Bidirectional server: expect SEND + RECV completions per request
+            worker_context.total_requests * 2
+        } else {
+            // Unidirectional server: expect only RECV completions per request
+            worker_context.total_requests
+        }
     } else {
-        worker_context.total_requests // Only SEND completions for client
+        // Client: expect only SEND completions per request
+        worker_context.total_requests
     };
 
     info!(
@@ -791,8 +805,32 @@ pub fn execute_send_latency_test<'a>(
     );
 
     while !worker_context.is_complete() || completions_needed > 0 {
-        // Only post SEND operations if we're a client (in unidirectional mode)
-        // In bidirectional mode, both client and server post SEND operations
+        // Post more receive buffers if needed (server only) - BEFORE sending
+        // This ensures server always has enough receive buffers available
+        if worker.plan.base().server {
+            // Check if we actually need more buffers before posting
+            let needs_buffers = (0..worker_context.queue_pair_count()).any(|qp_idx| {
+                send_executor
+                    .flow_control()
+                    .needs_recv_buffers_for_msg_size(qp_idx, msg_size)
+            });
+
+            if needs_buffers {
+                debug!(
+                    msg_size = msg_size,
+                    completed = worker_context.completed_requests,
+                    total = worker_context.total_requests,
+                    "Posting receive buffers in latency test based on flow control need"
+                );
+                send_executor.post_receive_buffers(worker, worker_context, msg_size)?;
+            }
+        }
+
+        // ---------------------------------------------
+        // 1. Post SEND operations when applicable
+        //    * Clients always SEND (unidirectional)
+        //    * Both peers SEND in bidirectional mode
+        // ---------------------------------------------
         if (!worker.plan.base().server || worker.plan.base().bidir)
             && worker_context.can_post_request(worker.tx_depth)
         {
@@ -817,9 +855,27 @@ pub fn execute_send_latency_test<'a>(
             completions_needed = completions_needed.saturating_sub(expected_completions);
         }
 
-        // Post more receive buffers if needed (server only)
-        if worker.plan.base().server {
-            send_executor.post_receive_buffers(worker, worker_context, msg_size)?;
+        // ---------------------------------------------
+        // 2. For server in unidirectional mode, we still need to make progress by
+        //    polling the completion queues for RECV completions. Without this,
+        //    the server would never detect completed receives and therefore
+        //    never refill its receive buffers, leading to a dead-lock.
+        // ---------------------------------------------
+
+        if worker.plan.base().server && !worker.plan.base().bidir {
+            // Track receive completions as progress so that WorkerContext gets
+            // updated and the main completion condition can be satisfied.
+            let (_send_completions, recv_completions) = poll_send_completions(
+                worker_context,
+                &mut send_executor,
+                /*track_recv_for_progress=*/ true,
+            )?;
+
+            if recv_completions > 0 {
+                // Each receive completion counts as one outstanding completion
+                // satisfied for the unidirectional server.
+                completions_needed = completions_needed.saturating_sub(recv_completions);
+            }
         }
     }
 

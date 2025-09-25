@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use sideway::ibverbs::address::Gid;
 use sideway::ibverbs::device_context::{DeviceContext, Mtu};
 use sideway::ibverbs::protection_domain::ProtectionDomain;
@@ -12,11 +11,10 @@ use crate::connection::threaded::{
 };
 use crate::connection::{
     ConnectionError, ConnectionParams, ConnectionResult, ConnectionType, DestinationInfo,
-    EndpointRole,
 };
 use crate::utils::{mtu, random};
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Connection session that runs connection operations in a separate thread for better performance
 pub struct ConnectionSession<'a> {

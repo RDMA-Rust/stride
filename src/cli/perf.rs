@@ -175,6 +175,12 @@ pub struct CommonOpts {
     /// MTU size (Byte)
     #[arg(long, short = 'm', value_enum, default_value_t = PathMtu::default())]
     pub mtu: PathMtu,
+    /// Enable trace-level logging output (can also be used globally)
+    #[arg(long)]
+    pub trace: bool,
+    /// Enable TUI (terminal user interface) output (can also be used globally)
+    #[arg(long)]
+    pub tui: bool,
 }
 
 impl TryFrom<Cli> for Plan {
@@ -272,14 +278,20 @@ impl TryFrom<Cli> for Plan {
             (true, format!("0.0.0.0:{}", common.port))
         };
 
+        // Determine trace and TUI settings from both global and subcommand flags (OR logic)
+        let trace_enabled = cli.trace || common.trace;
+        let tui_explicitly_enabled = cli.tui || common.tui;
+        
         // Determine output configuration based on CLI flags
         let output = OutputConfig {
-            trace_enabled: cli.trace,
-            // TUI is enabled by default, but disabled when trace is enabled unless both are explicitly provided
-            tui_enabled: if cli.trace && !cli.tui {
-                false // Trace enabled, TUI not explicitly enabled -> disable TUI
+            trace_enabled,
+            // TUI behavior:
+            // - Default: TUI enabled when no trace
+            // - With trace: TUI disabled unless explicitly enabled with --tui
+            tui_enabled: if trace_enabled {
+                tui_explicitly_enabled // Only enable TUI with trace if explicitly requested
             } else {
-                true // Default case or both flags provided
+                true // Default: TUI enabled when no trace
             },
         };
 
