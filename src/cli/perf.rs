@@ -101,7 +101,7 @@ pub struct WriteOpts {
     #[arg(long)]
     pub imm_data: bool,
     /// Size of Rx queue (only valid with --imm-data)
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, default_value_t = 0)]
     pub rx_depth: u32,
 }
 
@@ -206,11 +206,12 @@ impl TryFrom<Cli> for Plan {
             ),
             PerfCommands::Write(WriteCommands::Bandwidth(opts)) => {
                 // Validate rx_depth usage
-                if opts.rx_depth != 512 && !opts.imm_data {
+                if opts.rx_depth != 0 && !opts.imm_data {
                     return Err(anyhow::anyhow!(
-                        "Error: --rx-depth can only be used with --imm-data for write operations.\n\
+                        "--rx-depth can only be used with --imm-data for write operations.\n\
                          Regular write operations don't use receive queues.\n\
-                         Use: stride-perf write bw --imm-data --rx-depth {}", opts.rx_depth
+                         Use: stride-perf write bw --imm-data --rx-depth {}",
+                        opts.rx_depth
                     ));
                 }
                 (
@@ -224,11 +225,12 @@ impl TryFrom<Cli> for Plan {
             }
             PerfCommands::Write(WriteCommands::Latency(opts)) => {
                 // Validate rx_depth usage
-                if opts.rx_depth != 512 && !opts.imm_data {
+                if opts.rx_depth != 0 && !opts.imm_data {
                     return Err(anyhow::anyhow!(
-                        "Error: --rx-depth can only be used with --imm-data for write operations.\n\
+                        "--rx-depth can only be used with --imm-data for write operations.\n\
                          Regular write operations don't use receive queues.\n\
-                         Use: stride-perf write lat --imm-data --rx-depth {}", opts.rx_depth
+                         Use: stride-perf write lat --imm-data --rx-depth {}",
+                        opts.rx_depth
                     ));
                 }
                 (
@@ -281,7 +283,7 @@ impl TryFrom<Cli> for Plan {
         // Determine trace and TUI settings from both global and subcommand flags (OR logic)
         let trace_enabled = cli.trace || common.trace;
         let tui_explicitly_enabled = cli.tui || common.tui;
-        
+
         // Determine output configuration based on CLI flags
         let output = OutputConfig {
             trace_enabled,
