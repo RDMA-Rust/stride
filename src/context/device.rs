@@ -2,9 +2,10 @@ use sideway::ibverbs::{
     device::{DeviceInfo, DeviceList},
     device_context::DeviceContext,
 };
+use std::sync::Arc;
 use tracing::info;
 
-pub fn open_device_context(device_name: Option<&str>) -> Result<DeviceContext, String> {
+pub fn open_device_context(device_name: Option<&str>) -> Result<Arc<DeviceContext>, String> {
     let list = DeviceList::new().map_err(|e| format!("Failed to get device list: {e}"))?;
 
     if list.is_empty() {

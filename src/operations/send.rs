@@ -1,13 +1,11 @@
 use crate::runners::worker::{Worker, WorkerContext};
 use anyhow::Result;
 use quanta::IntoNanoseconds;
-use sideway::ibverbs::completion::WorkCompletionStatus;
+use sideway::ibverbs::completion::{GenericCompletionQueue, WorkCompletionStatus};
 use sideway::ibverbs::queue_pair::{
     PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
 };
-use std::cell::RefCell;
-use std::rc::Rc;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Credit-based flow control for SEND operations
 /// Based on perftest's flow control implementation
@@ -39,8 +37,8 @@ impl SendFlowControl {
         qp_count: usize,
         rx_depth: u32,
         per_qp_iterations: u32,
-        total_iterations: u32,
-        message_sizes: Vec<u32>,
+        _total_iterations: u32,
+        _message_sizes: Vec<u32>,
     ) -> Self {
         // RX depth should be minimum of configured depth and total iterations
         let effective_rx_depth = rx_depth.min(per_qp_iterations);
@@ -88,7 +86,7 @@ impl SendFlowControl {
 
     /// Check if QP needs more receive buffers
     pub fn needs_recv_buffers(&self, qp_idx: usize) -> bool {
-        info!(
+        trace!(
             qp_idx = qp_idx,
             recv_credits = self.recv_credits[qp_idx],
             rx_depth = self.rx_depth
@@ -203,7 +201,7 @@ pub struct SendOperationExecutor {
     /// Flow control manager
     flow_control: SendFlowControl,
     /// Whether immediate data is enabled
-    use_immediate_data: bool,
+    _use_immediate_data: bool,
 }
 
 impl SendOperationExecutor {
@@ -224,16 +222,16 @@ impl SendOperationExecutor {
                 total_iterations,
                 message_sizes,
             ),
-            use_immediate_data,
+            _use_immediate_data: use_immediate_data,
         }
     }
 
     /// Post initial receive buffers for server during initialization
     /// This ensures server has sufficient receive buffers ready before sync with client
-    pub fn post_initial_receive_buffers<'a>(
+    pub fn post_initial_receive_buffers(
         &mut self,
-        worker: &Worker<'a>,
-        worker_context: &mut WorkerContext<'a>,
+        worker: &Worker,
+        worker_context: &mut WorkerContext,
         msg_size: u32,
     ) -> Result<()> {
         debug!(
@@ -258,8 +256,8 @@ impl SendOperationExecutor {
 
             // Post initial receive buffers for this QP
             for recv_idx in 0..buffers_to_post {
-                let recv_addr = worker.calculate_operation_addr(qp_idx, msg_size);
-                let recv_addr = recv_addr + worker.increment_size as u64; // Separate receive area
+                let recv_addr =
+                    worker.calculate_qp_base_addr(qp_idx) + worker.increment_size as u64;
                 let wr_id = (qp_idx as u64) << 32 | recv_idx as u64;
 
                 // Create receive work request
@@ -299,10 +297,10 @@ impl SendOperationExecutor {
     }
 
     /// Post SEND operations to QPs with flow control
-    pub fn post_send_operations<'a>(
+    pub fn post_send_operations(
         &mut self,
-        worker: &Worker<'a>,
-        worker_context: &mut WorkerContext<'a>,
+        worker: &Worker,
+        worker_context: &mut WorkerContext,
         post_list: usize,
         msg_size: u32,
     ) -> Result<()> {
@@ -376,7 +374,7 @@ impl SendOperationExecutor {
 
                 // Calculate local address for this operation
                 let operation_index = (qp_operation_base + i as u32) % tx_depth;
-                let local_addr = worker.calculate_operation_addr(qp_idx, msg_size);
+                let local_addr = worker.calculate_operation_addr(qp_idx, operation_index as usize);
 
                 // Create SEND work request (start with basic SEND, immediate data support to be added later)
                 let send_handle = guard
@@ -411,10 +409,10 @@ impl SendOperationExecutor {
     }
 
     /// Post receive buffers for SEND operations with flow control
-    pub fn post_receive_buffers<'a>(
+    pub fn post_receive_buffers(
         &mut self,
-        worker: &Worker<'a>,
-        worker_context: &mut WorkerContext<'a>,
+        worker: &Worker,
+        worker_context: &mut WorkerContext,
         msg_size: u32,
     ) -> Result<()> {
         use sideway::ibverbs::queue_pair::{QueuePair, SetScatterGatherEntry};
@@ -485,10 +483,8 @@ impl SendOperationExecutor {
                 // posted_recv_per_qp tracks ALL buffers ever posted for this QP (never reset)
                 // This ensures unique buffer addresses across message size transitions
                 let recv_buffer_offset = self.flow_control.posted_recv_per_qp[qp_idx] + recv_idx;
-                let recv_addr = worker.calculate_operation_addr(qp_idx, msg_size);
-
-                // Add offset to separate receive area from send area
-                let recv_addr = recv_addr + worker.increment_size as u64;
+                let recv_addr =
+                    worker.calculate_qp_base_addr(qp_idx) + worker.increment_size as u64;
 
                 let wr_id = (qp_idx as u64) << 32 | recv_buffer_offset as u64;
 
@@ -570,9 +566,9 @@ impl SendOperationExecutor {
 }
 
 /// Execute SEND bandwidth test with flow control
-pub fn execute_send_bandwidth_test<'a>(
-    worker: &Worker<'a>,
-    worker_context: &mut WorkerContext<'a>,
+pub fn execute_send_bandwidth_test(
+    worker: &Worker,
+    worker_context: &mut WorkerContext,
     msg_size: u32,
     rx_depth: u32,
     use_immediate_data: bool,
@@ -747,9 +743,9 @@ pub fn execute_send_bandwidth_test<'a>(
 }
 
 /// Execute SEND latency test with flow control
-pub fn execute_send_latency_test<'a>(
-    worker: &Worker<'a>,
-    worker_context: &mut WorkerContext<'a>,
+pub fn execute_send_latency_test(
+    worker: &Worker,
+    worker_context: &mut WorkerContext,
     msg_size: u32,
     rx_depth: u32,
     use_immediate_data: bool,
@@ -884,7 +880,7 @@ pub fn execute_send_latency_test<'a>(
 
 /// Wait for SEND completion and handle flow control
 fn wait_for_send_completion(
-    cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
+    cq: &GenericCompletionQueue,
     start_time: quanta::Instant,
     histogram: &mut hdrhistogram::Histogram<u64>,
     worker_context: &mut WorkerContext,
@@ -903,7 +899,7 @@ fn wait_for_send_completion(
         && std::time::Instant::now() < deadline
     {
         // Poll for completions
-        match cq.borrow_mut().start_poll() {
+        match cq.start_poll() {
             Ok(mut poller) => {
                 while let Some(wc) = poller.next() {
                     if wc.status() != WorkCompletionStatus::Success as u32 {
@@ -976,10 +972,10 @@ fn poll_send_completions(
     // 2. Process completions
 
     // Step 1: Poll send completion queue
-    let send_cq = worker_context.send_completion_queue().clone();
+    let send_cq = worker_context.send_completion_queue();
     let mut send_completion_info = Vec::new();
 
-    match send_cq.borrow_mut().start_poll() {
+    match send_cq.start_poll() {
         Ok(mut poller) => {
             while let Some(wc) = poller.next() {
                 if wc.status() != WorkCompletionStatus::Success as u32 {
@@ -1020,8 +1016,7 @@ fn poll_send_completions(
     let mut recv_completion_info = Vec::new();
 
     if let Some(recv_cq) = worker_context.recv_completion_queue() {
-        let recv_cq = recv_cq.clone();
-        match recv_cq.borrow_mut().start_poll() {
+        match recv_cq.start_poll() {
             Ok(mut poller) => {
                 while let Some(wc) = poller.next() {
                     if wc.status() != WorkCompletionStatus::Success as u32 {

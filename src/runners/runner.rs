@@ -13,15 +13,12 @@ use crate::utils::random;
 use anyhow::Result;
 use byte_unit::Byte;
 use quanta::{Clock, Instant, IntoNanoseconds};
-use sideway::ibverbs::completion::WorkCompletionStatus;
+use sideway::ibverbs::completion::{GenericCompletionQueue, WorkCompletionStatus};
 use sideway::ibverbs::device::DeviceInfo;
 use sideway::ibverbs::queue_pair::{
     PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
 };
 use sideway::ibverbs::AccessFlags;
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -36,12 +33,12 @@ impl PlanTestRunner {
     }
 
     /// Setup connection using the Worker interface
-    fn setup_connection<'a>(
+    fn setup_connection(
         &self,
-        worker: &Worker<'a>,
-        worker_context: &mut WorkerContext<'a>,
+        worker: &Worker,
+        worker_context: &mut WorkerContext,
         total_buffer_size: usize,
-    ) -> Result<(ConnectionSetupResult, ConnectionSession<'a>)> {
+    ) -> Result<(ConnectionSetupResult, ConnectionSession)> {
         let gid_index = self.plan.base().gid_index.unwrap_or(0);
         let server_mode = self.plan.base().server;
 
@@ -168,10 +165,10 @@ impl PlanTestRunner {
     }
 
     /// Execute RDMA operations for a single worker
-    fn execute_worker<'a>(
+    fn execute_worker(
         &self,
-        worker: &Worker<'a>,
-        worker_context: &mut WorkerContext<'a>,
+        worker: &Worker,
+        worker_context: &mut WorkerContext,
         msg_size: u32,
         remote_mr: &crate::connection::exchange::MemoryRegionInfo,
         histogram: &mut hdrhistogram::Histogram<u64>,
@@ -222,15 +219,15 @@ impl PlanTestRunner {
     }
 
     /// Latency test callback - post one operation, wait for completion, repeat
-    fn execute_latency_test<'a>(
+    fn execute_latency_test(
         &self,
-        worker: &Worker<'a>,
-        worker_context: &mut WorkerContext<'a>,
+        worker: &Worker,
+        worker_context: &mut WorkerContext,
         msg_size: u32,
         remote_mr: &crate::connection::exchange::MemoryRegionInfo,
         histogram: &mut hdrhistogram::Histogram<u64>,
         clock: &Clock,
-        cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
+        cq: &GenericCompletionQueue,
         start_time: Instant,
         min_latency_ns: &mut u64,
         max_latency_ns: &mut u64,
@@ -292,13 +289,13 @@ impl PlanTestRunner {
     }
 
     /// Bandwidth test callback - batch posting and polling
-    fn execute_bandwidth_test<'a>(
+    fn execute_bandwidth_test(
         &self,
-        worker: &Worker<'a>,
-        worker_context: &mut WorkerContext<'a>,
+        worker: &Worker,
+        worker_context: &mut WorkerContext,
         msg_size: u32,
         remote_mr: &crate::connection::exchange::MemoryRegionInfo,
-        cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
+        cq: &GenericCompletionQueue,
     ) -> Result<()> {
         // Check if this is a SEND operation that needs special handling
         match self.plan {
@@ -351,7 +348,7 @@ impl PlanTestRunner {
     #[inline]
     fn wait_for_completion(
         &self,
-        cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
+        cq: &GenericCompletionQueue,
         start_time: Instant,
         histogram: &mut hdrhistogram::Histogram<u64>,
         min_latency_ns: &mut u64,
@@ -375,7 +372,7 @@ impl PlanTestRunner {
             }
 
             // Proper CQ polling pattern following main.rs example
-            match cq.borrow_mut().start_poll() {
+            match cq.start_poll() {
                 Ok(mut poller) => {
                     while let Some(wc) = poller.next() {
                         if wc.status() != WorkCompletionStatus::Success as u32 {
@@ -414,13 +411,13 @@ impl PlanTestRunner {
     #[inline(always)]
     fn poll_completions_once(
         &self,
-        cq: &Rc<RefCell<sideway::ibverbs::completion::ExtendedCompletionQueue>>,
+        cq: &GenericCompletionQueue,
         worker_context: &mut WorkerContext,
     ) -> Result<bool> {
         let cqe_poll_limit = self.plan.poll_batch(); // Respect user-configured batch size
 
         // Proper CQ polling pattern - poll up to cqe_poll_limit completions to prevent bubbles
-        match cq.borrow_mut().start_poll() {
+        match cq.start_poll() {
             Ok(mut poller) => {
                 // PERFORMANCE CRITICAL: Batch completion counting with per-QP tracking
                 let mut completed_count = 0u32;
@@ -471,10 +468,10 @@ impl PlanTestRunner {
     }
 
     /// Helper method to post operations to QPs
-    fn post_operations<'a>(
+    fn post_operations(
         &self,
-        worker: &Worker<'a>,
-        worker_context: &mut WorkerContext<'a>,
+        worker: &Worker,
+        worker_context: &mut WorkerContext,
         post_list: usize,
         msg_size: u32,
         remote_mr: &crate::connection::exchange::MemoryRegionInfo,
@@ -491,8 +488,8 @@ impl PlanTestRunner {
         let tx_depth_mask = tx_depth - 1;
 
         // Create buffers for state to avoid borrow conflicts
-        let completed = worker_context.completed_requests;
-        let inflight = worker_context.inflight_requests;
+        let _completed = worker_context.completed_requests;
+        let _inflight = worker_context.inflight_requests;
         let qp_count = worker_context.queue_pair_count();
 
         // perftest approach: each QP posts post_list operations (not split across QPs)
@@ -590,8 +587,9 @@ impl PlanTestRunner {
 
         info!("Will test {} message sizes", msg_sizes.len());
 
-        let ctx = Arc::new(open_device_context(device_name)?);
-        let pd = Arc::new(ctx.alloc_pd()?);
+        let ctx = open_device_context(device_name)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let pd = ctx.alloc_pd()?;
 
         // Determine test type
         let test_type = match (self.plan.operation(), self.plan.is_latency()) {

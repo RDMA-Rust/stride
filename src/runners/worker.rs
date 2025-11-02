@@ -1,17 +1,41 @@
 use crate::cli::plan::Plan;
+use crate::memory::aligned::DEFAULT_CACHE_LINE_SIZE;
 use crate::memory::MemoryOps;
 use anyhow::Result;
 use sideway::ibverbs::completion::{
-    CreateCompletionQueueWorkCompletionFlags, ExtendedCompletionQueue,
+    CreateCompletionQueueWorkCompletionFlags, GenericCompletionQueue,
 };
 use sideway::ibverbs::device_context::DeviceContext;
 use sideway::ibverbs::memory_region::MemoryRegion;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::GenericQueuePair;
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::Arc;
 use tracing::{debug, info};
+
+const SEND_RECV_REGION_MULTIPLIER: usize = 2;
+
+pub fn calculate_qp_region_offset(
+    worker_offset: usize,
+    increment_size: usize,
+    qp_idx: usize,
+) -> usize {
+    worker_offset + qp_idx * increment_size * SEND_RECV_REGION_MULTIPLIER
+}
+
+pub fn compute_qp_slot_count(increment_size: usize) -> usize {
+    ((increment_size / DEFAULT_CACHE_LINE_SIZE).max(1)).min(64)
+}
+
+pub fn calculate_send_slot_offset(increment_size: usize, buffer_slot: usize) -> usize {
+    let slot_count = compute_qp_slot_count(increment_size);
+    let slot_index = if slot_count > 0 {
+        buffer_slot % slot_count
+    } else {
+        0
+    };
+
+    slot_index * DEFAULT_CACHE_LINE_SIZE
+}
 
 /// Calculate effective depth based on configured depth and total iterations
 /// This prevents over-allocation when iteration count is smaller than configured depths
@@ -21,15 +45,15 @@ pub fn calculate_effective_depth(configured_depth: u32, total_iterations: u32) -
 
 /// Worker that owns all RDMA resources needed for independent operation
 /// This is the parent struct that has stable addresses for borrowing
-pub struct Worker<'a> {
+pub struct Worker {
     /// Primary memory region for this worker (None for shared memory workers)
-    pub memory_region: Option<MemoryRegion<'a>>,
+    pub memory_region: Option<Arc<MemoryRegion>>,
     /// Optional additional memory regions (for multi-buffer scenarios)
-    pub additional_memory_regions: Vec<MemoryRegion<'a>>,
+    pub additional_memory_regions: Vec<Arc<MemoryRegion>>,
     /// Memory allocator handle (for cleanup) - None for shared memory workers
     pub memory: Option<Box<dyn MemoryOps>>,
     /// Protection domain (shared across workers)
-    pub pd: Arc<ProtectionDomain<'a>>,
+    pub pd: Arc<ProtectionDomain>,
     /// Device context (shared across workers)
     pub device: Arc<DeviceContext>,
     /// Test plan configuration
@@ -55,13 +79,13 @@ pub struct Worker<'a> {
 /// performance while handling self-referential lifetime issues safely.
 ///
 /// Element orders matter, as we should release QP first and then release CQ
-pub struct WorkerContext<'a> {
+pub struct WorkerContext {
     /// Queue pairs owned by this worker
-    pub queue_pairs: Vec<GenericQueuePair<'a>>,
-    /// Send completion queue wrapped in Rc<RefCell<>> for safe sharing
-    pub send_completion_queue: Rc<RefCell<ExtendedCompletionQueue<'a>>>,
-    /// Receive completion queue wrapped in Rc<RefCell<>> for safe sharing (for SEND operations)
-    pub recv_completion_queue: Option<Rc<RefCell<ExtendedCompletionQueue<'a>>>>,
+    pub queue_pairs: Vec<GenericQueuePair>,
+    /// Send completion queue shared across queue pairs
+    pub send_completion_queue: GenericCompletionQueue,
+    /// Receive completion queue shared across queue pairs (for SEND operations)
+    pub recv_completion_queue: Option<GenericCompletionQueue>,
     /// Pre-calculated local buffer addresses flattened for cache efficiency
     /// Format: qp_buffer_addrs[qp_idx * tx_depth + operation_index] = local_addr
     pub qp_buffer_addrs: Vec<u64>,
@@ -84,12 +108,12 @@ pub struct WorkerContext<'a> {
     pub round: u32,
 }
 
-impl<'a> Worker<'a> {
+impl Worker {
     /// Create a new worker with all RDMA resources (legacy method)
     pub fn new(
         device: Arc<DeviceContext>,
-        pd: Arc<ProtectionDomain<'a>>,
-        memory_region: MemoryRegion<'a>,
+        pd: Arc<ProtectionDomain>,
+        memory_region: Arc<MemoryRegion>,
         memory: Box<dyn MemoryOps>,
         plan: Plan,
         thread_id: usize,
@@ -141,7 +165,7 @@ impl<'a> Worker<'a> {
     /// Create a new worker with shared memory region (perftest-style)
     pub fn new_with_shared_memory(
         device: Arc<DeviceContext>,
-        pd: Arc<ProtectionDomain<'a>>,
+        pd: Arc<ProtectionDomain>,
         lkey: u32, // Just pass the lkey, not the full MR
         base_addr: *mut u8,
         increment_size: usize,
@@ -191,21 +215,22 @@ impl<'a> Worker<'a> {
         }
     }
 
-    /// Calculate address for a specific operation following perftest pattern exactly
+    /// Calculate base address of the send buffer region for a specific QP
     #[inline(always)]
-    pub fn calculate_operation_addr(&self, operation_index: usize, msg_size: u32) -> u64 {
-        // PERFORMANCE CRITICAL: perftest-style address cycling for optimal cache behavior
+    pub fn calculate_qp_base_addr(&self, qp_idx: usize) -> u64 {
+        let qp_offset = calculate_qp_region_offset(self.worker_offset, self.increment_size, qp_idx);
+        unsafe { self.base_addr.add(qp_offset) as u64 }
+    }
 
-        // perftest pattern: cycle within the worker's own memory space
-        // operation_index is masked to tx_depth, so we cycle within our allocated space
+    /// Calculate address for a specific buffer slot (send region) within a QP
+    #[inline(always)]
+    pub fn calculate_operation_addr(&self, qp_idx: usize, buffer_slot: usize) -> u64 {
+        let base_addr = self.calculate_qp_base_addr(qp_idx);
 
-        // Each operation gets a cache-line aligned offset within this worker's space
-        // Use smaller cycling to stay within worker boundaries
-        let cycle_mask = 0x3F; // Cycle through 64 positions (4KB for 64-byte cache lines)
-        let addr_offset = (operation_index & cycle_mask) * 64; // Cache line size
-        let final_addr_offset = self.worker_offset + addr_offset;
+        // For send buffers, cycle through cache-line sized slots to mimic perftest pattern
+        let offset = calculate_send_slot_offset(self.increment_size, buffer_slot);
 
-        unsafe { self.base_addr.add(final_addr_offset) as u64 }
+        base_addr + offset as u64
     }
 
     /// Calculate message-size-aware address for incremental memory usage
@@ -213,30 +238,52 @@ impl<'a> Worker<'a> {
     #[inline(always)]
     pub fn calculate_message_size_addr(
         &self,
+        qp_idx: usize,
         operation_index: u32,
         msg_size: u32,
         max_msg_size: u32,
     ) -> u64 {
         // Use the standard address calculation but adjust for message size efficiency
-        let base_addr = self.calculate_operation_addr(operation_index as usize, msg_size);
+        let base_addr = self.calculate_operation_addr(qp_idx, operation_index as usize);
 
         // For messages smaller than max size, we can optimize memory usage
         // by using only the portion of memory we actually need
         if msg_size < max_msg_size && msg_size > 0 {
-            // Use incremental addressing: smaller messages use earlier portions of the buffer
-            // This improves cache locality for small message tests
-            let size_ratio = msg_size as f64 / max_msg_size as f64;
-            let addr_adjustment =
-                ((operation_index as usize % 16) as f64 * size_ratio) as usize * 64;
-            unsafe { self.base_addr.add(self.worker_offset + addr_adjustment) as u64 }
+            let slot_count = compute_qp_slot_count(self.increment_size).min(16);
+            let slot_index = if slot_count > 0 {
+                operation_index as usize % slot_count
+            } else {
+                0
+            };
+
+            // Scale the stride based on actual message size while staying within send region
+            let slots_per_message = ((msg_size as usize + DEFAULT_CACHE_LINE_SIZE - 1)
+                / DEFAULT_CACHE_LINE_SIZE)
+                .max(1);
+            let mut offset = slot_index * slots_per_message * DEFAULT_CACHE_LINE_SIZE;
+            let qp_offset =
+                calculate_qp_region_offset(self.worker_offset, self.increment_size, qp_idx);
+
+            let max_send_offset = self.increment_size.saturating_sub(DEFAULT_CACHE_LINE_SIZE);
+            if offset > max_send_offset {
+                offset = max_send_offset;
+            }
+
+            unsafe { self.base_addr.add(qp_offset + offset) as u64 }
         } else {
             // For max-sized messages or when sizes are equal, use standard addressing
             base_addr
         }
     }
 
+    /// Total number of cache line slots available within the QP send region
+    #[inline(always)]
+    pub(crate) fn _qp_slot_count(&self) -> usize {
+        compute_qp_slot_count(self.increment_size)
+    }
+
     /// Add an additional memory region
-    pub fn add_memory_region(&mut self, mr: MemoryRegion<'a>) {
+    pub fn add_memory_region(&mut self, mr: Arc<MemoryRegion>) {
         debug!(
             thread_id = self.thread_id,
             mr_count = self.additional_memory_regions.len() + 1,
@@ -246,8 +293,8 @@ impl<'a> Worker<'a> {
     }
 
     /// Get the primary memory region (for legacy compatibility)
-    pub fn primary_memory_region(&self) -> Option<&MemoryRegion<'a>> {
-        self.memory_region.as_ref()
+    pub fn primary_memory_region(&self) -> Option<Arc<MemoryRegion>> {
+        self.memory_region.clone()
     }
 
     /// Get the lkey for RDMA operations
@@ -256,22 +303,18 @@ impl<'a> Worker<'a> {
     }
 
     /// Get all memory regions (primary + additional)
-    pub fn all_memory_regions(&self) -> impl Iterator<Item = &MemoryRegion<'a>> {
+    pub fn all_memory_regions(&self) -> impl Iterator<Item = Arc<MemoryRegion>> + '_ {
         self.memory_region
             .iter()
-            .chain(self.additional_memory_regions.iter())
+            .cloned()
+            .chain(self.additional_memory_regions.iter().cloned())
     }
 }
 
-impl<'a> WorkerContext<'a> {
+impl WorkerContext {
     /// Create a new worker context using unsafe code to handle self-referential lifetimes
     /// This follows the pattern you suggested with Rc<RefCell<>> for the completion queue
-    pub fn new(
-        worker: &'a Worker<'a>,
-        plan: &Plan,
-        iterations: u32,
-        qp_count: usize,
-    ) -> Result<Self> {
+    pub fn new(worker: &Worker, plan: &Plan, iterations: u32, qp_count: usize) -> Result<Self> {
         info!(
             thread_id = worker.thread_id,
             iterations = iterations,
@@ -282,19 +325,17 @@ impl<'a> WorkerContext<'a> {
         // Create the send completion queue using the worker's device
         let send_cqe_size = worker.tx_depth * qp_count as u32;
 
-        let send_cq = worker
+        let send_cq: GenericCompletionQueue = worker
             .device
             .create_cq_builder()
             .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
             .setup_cqe(send_cqe_size)
             .build_ex()
-            .map_err(|e| anyhow::anyhow!("Failed to create send CQ: {}", e))?;
-
-        // Wrap the send CQ in Rc<RefCell<>>
-        let send_cq_wrapped = Rc::new(RefCell::new(send_cq));
+            .map_err(|e| anyhow::anyhow!("Failed to create send CQ: {}", e))?
+            .into();
 
         // For SEND operations, create a separate receive completion queue
-        let recv_cq_wrapped = if matches!(plan, crate::cli::plan::Plan::Send(_)) {
+        let recv_cq = if matches!(plan, crate::cli::plan::Plan::Send(_)) {
             let rx_depth = worker.rx_depth.unwrap_or(512);
             let recv_cqe_size = rx_depth * qp_count as u32;
 
@@ -306,22 +347,23 @@ impl<'a> WorkerContext<'a> {
                 "Creating separate receive CQ for SEND operations"
             );
 
-            let recv_cq = worker
+            let recv_cq: GenericCompletionQueue = worker
                 .device
                 .create_cq_builder()
                 .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
                 .setup_cqe(recv_cqe_size)
                 .build_ex()
-                .map_err(|e| anyhow::anyhow!("Failed to create recv CQ: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to create recv CQ: {}", e))?
+                .into();
 
-            Some(Rc::new(RefCell::new(recv_cq)))
+            Some(recv_cq)
         } else {
             None
         };
 
         Ok(Self {
-            send_completion_queue: send_cq_wrapped,
-            recv_completion_queue: recv_cq_wrapped,
+            send_completion_queue: send_cq,
+            recv_completion_queue: recv_cq,
             queue_pairs: Vec::new(),
             qp_buffer_addrs: Vec::new(),
             qp_remote_addrs: Vec::new(),
@@ -337,33 +379,24 @@ impl<'a> WorkerContext<'a> {
     }
 
     /// Add a queue pair to this worker context using unsafe code for lifetime management
-    pub fn add_queue_pair(&mut self, worker: &'a Worker<'a>) -> Result<()> {
+    pub fn add_queue_pair(&mut self, worker: &Worker) -> Result<()> {
         // Create the queue pair using the worker's protection domain
-        // We need to use unsafe to get a raw reference that lives long enough
-        let qp = unsafe {
-            let send_cq_ptr = self.send_completion_queue.as_ptr();
-            let send_cq_ref = &*send_cq_ptr;
+        let recv_cq = self
+            .recv_completion_queue
+            .clone()
+            .unwrap_or_else(|| self.send_completion_queue.clone());
 
-            // Use separate recv CQ for SEND operations, or reuse send CQ for WRITE/READ
-            let recv_cq_ref = if let Some(ref recv_cq) = self.recv_completion_queue {
-                let recv_cq_ptr = recv_cq.as_ptr();
-                &*recv_cq_ptr
-            } else {
-                send_cq_ref // Use same CQ for WRITE/READ operations
-            };
-
-            worker
-                .pd
-                .create_qp_builder()
-                .setup_max_inline_data(256)
-                .setup_send_cq(send_cq_ref)
-                .setup_recv_cq(recv_cq_ref)
-                .setup_max_send_wr(worker.tx_depth)
-                .setup_max_recv_wr(worker.rx_depth.unwrap_or(512))
-                .build_ex()
-                .map_err(|e| anyhow::anyhow!("Failed to create QP: {}", e))?
-                .into()
-        };
+        let qp = worker
+            .pd
+            .create_qp_builder()
+            .setup_max_inline_data(256)
+            .setup_send_cq(self.send_completion_queue.clone())
+            .setup_recv_cq(recv_cq)
+            .setup_max_send_wr(worker.tx_depth)
+            .setup_max_recv_wr(worker.rx_depth.unwrap_or(512))
+            .build_ex()
+            .map_err(|e| anyhow::anyhow!("Failed to create QP: {}", e))?
+            .into();
 
         debug!(
             thread_id = worker.thread_id,
@@ -378,14 +411,13 @@ impl<'a> WorkerContext<'a> {
         self.qp_buffer_addrs.reserve(tx_depth);
         self.qp_remote_addrs.reserve(tx_depth);
 
+        let qp_idx = self.queue_pairs.len();
         for op_idx in 0..worker.tx_depth {
-            // Pre-calculate local address for this operation index
-            let local_addr = worker.calculate_operation_addr(self.queue_pairs.len(), 0); // msg_size not needed for addr calc
+            let local_addr = worker.calculate_operation_addr(qp_idx, op_idx as usize);
             self.qp_buffer_addrs.push(local_addr);
 
-            // Pre-calculate remote address offset (will be updated with actual remote_mr later)
             let local_offset = local_addr - (worker.base_addr as u64);
-            self.qp_remote_addrs.push(local_offset); // Store offset for now, will add remote_mr.addr later
+            self.qp_remote_addrs.push(local_offset);
         }
         self.qp_send_counts.push(0); // Initialize per-QP send counter
         self.qp_completion_counts.push(0); // Initialize per-QP completion counter
@@ -478,29 +510,26 @@ impl<'a> WorkerContext<'a> {
     }
 
     /// Get queue pair by index (bounds-checked)
-    pub fn get_queue_pair(&self, index: usize) -> Option<&GenericQueuePair<'a>> {
+    pub fn get_queue_pair(&self, index: usize) -> Option<&GenericQueuePair> {
         self.queue_pairs.get(index)
     }
 
     /// Get mutable queue pair by index (bounds-checked)
-    pub fn get_queue_pair_mut(&mut self, index: usize) -> Option<&mut GenericQueuePair<'a>> {
+    pub fn get_queue_pair_mut(&mut self, index: usize) -> Option<&mut GenericQueuePair> {
         self.queue_pairs.get_mut(index)
     }
 
     /// Get queue pair by index (unchecked for hot paths)
     /// SAFETY: Caller must ensure index < queue_pair_count()
     #[inline(always)]
-    pub unsafe fn get_queue_pair_unchecked(&self, index: usize) -> &GenericQueuePair<'a> {
+    pub unsafe fn get_queue_pair_unchecked(&self, index: usize) -> &GenericQueuePair {
         self.queue_pairs.get_unchecked(index)
     }
 
     /// Get mutable queue pair by index (unchecked for hot paths)
     /// SAFETY: Caller must ensure index < queue_pair_count()
     #[inline(always)]
-    pub unsafe fn get_queue_pair_mut_unchecked(
-        &mut self,
-        index: usize,
-    ) -> &mut GenericQueuePair<'a> {
+    pub unsafe fn get_queue_pair_mut_unchecked(&mut self, index: usize) -> &mut GenericQueuePair {
         self.queue_pairs.get_unchecked_mut(index)
     }
 
@@ -510,17 +539,17 @@ impl<'a> WorkerContext<'a> {
     }
 
     /// Get send completion queue (for polling operations)
-    pub fn completion_queue(&self) -> &Rc<RefCell<ExtendedCompletionQueue<'a>>> {
+    pub fn completion_queue(&self) -> &GenericCompletionQueue {
         &self.send_completion_queue
     }
 
     /// Get send completion queue (explicit)
-    pub fn send_completion_queue(&self) -> &Rc<RefCell<ExtendedCompletionQueue<'a>>> {
+    pub fn send_completion_queue(&self) -> &GenericCompletionQueue {
         &self.send_completion_queue
     }
 
     /// Get receive completion queue (for SEND operations)
-    pub fn recv_completion_queue(&self) -> Option<&Rc<RefCell<ExtendedCompletionQueue<'a>>>> {
+    pub fn recv_completion_queue(&self) -> Option<&GenericCompletionQueue> {
         self.recv_completion_queue.as_ref()
     }
 
@@ -534,7 +563,7 @@ impl<'a> WorkerContext<'a> {
     /// Post receive buffers for SEND operations (both client and server need this)
     pub fn post_receive_buffers(
         &mut self,
-        worker: &Worker<'a>,
+        worker: &Worker,
         rx_depth: u32,
         msg_size: u32,
     ) -> anyhow::Result<()> {
@@ -552,8 +581,8 @@ impl<'a> WorkerContext<'a> {
             for recv_idx in 0..rx_depth {
                 // Use receive buffer area (second half of the memory region)
                 // Each QP gets increment_size * 2 space: first half for send, second half for receive
-                let send_addr = worker.calculate_operation_addr(qp_idx, msg_size);
-                let recv_addr = send_addr + worker.increment_size as u64; // Add increment_size to get receive buffer area
+                let recv_addr =
+                    worker.calculate_qp_base_addr(qp_idx) + worker.increment_size as u64;
                 let wr_id = (qp_idx as u64) << 32 | recv_idx as u64;
 
                 // Create receive work request
@@ -594,9 +623,9 @@ impl<'a> WorkerContext<'a> {
 }
 
 /// Trait for worker execution strategies
-pub trait WorkerExecutor<'a> {
+pub trait WorkerExecutor {
     /// Execute the worker's portion of the test
-    fn execute(&mut self, context: &mut WorkerContext<'a>) -> Result<WorkerResult>;
+    fn execute(&mut self, context: &mut WorkerContext) -> Result<WorkerResult>;
 }
 
 /// Result from a worker execution

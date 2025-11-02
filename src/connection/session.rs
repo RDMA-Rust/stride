@@ -5,7 +5,7 @@ use sideway::ibverbs::queue_pair::{GenericQueuePair, QueuePair};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::connection::exchange::{MemoryRegionInfo, MtuNegotiationInfo, TestResults};
+use crate::connection::exchange::{MemoryRegionInfo, TestResults};
 use crate::connection::threaded::{
     ConnectionData, ThreadedConnectionFactory, ThreadedConnectionManager,
 };
@@ -17,10 +17,10 @@ use crate::utils::{mtu, random};
 use tracing::{debug, info};
 
 /// Connection session that runs connection operations in a separate thread for better performance
-pub struct ConnectionSession<'a> {
+pub struct ConnectionSession {
     manager: ThreadedConnectionManager,
     ctx: Arc<DeviceContext>,
-    pd: Arc<ProtectionDomain<'a>>,
+    _pd: Arc<ProtectionDomain>,
     local_gid_index: u8,
     local_gid: Option<Gid>,
     remote_gid: Option<Gid>,
@@ -28,12 +28,12 @@ pub struct ConnectionSession<'a> {
     negotiated_mtu: Option<Mtu>,
 }
 
-impl<'a> ConnectionSession<'a> {
+impl ConnectionSession {
     /// Create a new connection session
     pub fn new(
         conn_type: ConnectionType,
         ctx: Arc<DeviceContext>,
-        pd: Arc<ProtectionDomain<'a>>,
+        pd: Arc<ProtectionDomain>,
         params: ConnectionParams,
         gid_index: u8,
         requested_mtu: Mtu,
@@ -43,7 +43,7 @@ impl<'a> ConnectionSession<'a> {
         Ok(Self {
             manager,
             ctx,
-            pd,
+            _pd: pd,
             local_gid_index: gid_index,
             local_gid: None,
             remote_gid: None,
