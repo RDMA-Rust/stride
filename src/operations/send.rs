@@ -248,8 +248,8 @@ impl SendOperationExecutor {
                 continue;
             }
 
-            // Get QP (unchecked for performance)
-            let qp = unsafe { worker_context.get_queue_pair_mut_unchecked(qp_idx) };
+            // Get QP (debug-asserted fast path)
+            let qp = worker_context.get_queue_pair_mut_unchecked(qp_idx);
 
             // Start post receive guard
             let mut guard = qp.start_post_recv();
@@ -358,7 +358,7 @@ impl SendOperationExecutor {
 
             // Get QP (unchecked for performance)
             // SAFETY: qp_idx < qp_count, which is the number of QPs we created
-            let qp = unsafe { worker_context.get_queue_pair_mut_unchecked(qp_idx) };
+            let qp = worker_context.get_queue_pair_mut_unchecked(qp_idx);
 
             // Create post guard for this QP
             let mut guard = qp.start_post_send();
@@ -472,7 +472,7 @@ impl SendOperationExecutor {
 
             // Get QP (unchecked for performance)
             // SAFETY: qp_idx < queue_pair_count(), which is the number of QPs we created
-            let qp = unsafe { worker_context.get_queue_pair_mut_unchecked(qp_idx) };
+            let qp = worker_context.get_queue_pair_mut_unchecked(qp_idx);
 
             // Start post receive guard
             let mut guard = qp.start_post_recv();
@@ -913,6 +913,7 @@ fn wait_for_send_completion(
 
                     // Extract QP index from wr_id
                     let qp_idx = ((wc.wr_id() >> 16) & 0xFFFF) as usize;
+                    debug_assert!(qp_idx < worker_context.queue_pair_count());
 
                     // Determine if this is SEND or RECV completion
                     if wc.wr_id() & 0xFFFF < 32768 {
@@ -997,6 +998,7 @@ fn poll_send_completions(
 
                 // Extract QP index from wr_id
                 let qp_idx = ((wc.wr_id() >> 16) & 0xFFFF) as usize;
+                debug_assert!(qp_idx < worker_context.queue_pair_count());
                 send_completion_info.push(qp_idx);
             }
         }
@@ -1039,6 +1041,7 @@ fn poll_send_completions(
 
                     // Extract QP index from wr_id (different encoding for recv)
                     let qp_idx = ((wc.wr_id() >> 32) & 0xFFFF) as usize;
+                    debug_assert!(qp_idx < worker_context.queue_pair_count());
                     recv_completion_info.push(qp_idx);
                 }
             }

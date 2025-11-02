@@ -523,7 +523,7 @@ impl PlanTestRunner {
 
             // Get QP (unchecked for performance)
             // SAFETY: qp_idx < qp_count, which is the number of QPs we created
-            let qp = unsafe { worker_context.get_queue_pair_mut_unchecked(qp_idx) };
+            let qp = worker_context.get_queue_pair_mut_unchecked(qp_idx);
 
             // Create post guard for this QP
             let mut guard = qp.start_post_send();

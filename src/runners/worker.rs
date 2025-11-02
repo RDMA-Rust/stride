@@ -75,10 +75,9 @@ pub struct Worker {
 }
 
 /// Worker context that contains all resources needed for a thread worker
-/// to execute RDMA operations independently. Uses Rc<RefCell<>> for single-threaded
-/// performance while handling self-referential lifetime issues safely.
-///
-/// Element orders matter, as we should release QP first and then release CQ
+/// to execute RDMA operations independently. With Arc-backed sideway handles we no
+/// longer need the old `Rc<RefCell<_>>` wrappers, so the context stores and shares
+/// completion queues directly while keeping deterministic drop ordering (QP before CQ).
 pub struct WorkerContext {
     /// Queue pairs owned by this worker
     pub queue_pairs: Vec<GenericQueuePair>,
@@ -292,9 +291,9 @@ impl Worker {
         self.additional_memory_regions.push(mr);
     }
 
-    /// Get the primary memory region (for legacy compatibility)
-    pub fn primary_memory_region(&self) -> Option<Arc<MemoryRegion>> {
-        self.memory_region.clone()
+    /// Get a reference to the primary memory region (for legacy compatibility)
+    pub fn primary_memory_region(&self) -> Option<&MemoryRegion> {
+        self.memory_region.as_deref()
     }
 
     /// Get the lkey for RDMA operations
@@ -303,17 +302,16 @@ impl Worker {
     }
 
     /// Get all memory regions (primary + additional)
-    pub fn all_memory_regions(&self) -> impl Iterator<Item = Arc<MemoryRegion>> + '_ {
+    pub fn all_memory_regions(&self) -> impl Iterator<Item = &Arc<MemoryRegion>> {
         self.memory_region
             .iter()
-            .cloned()
-            .chain(self.additional_memory_regions.iter().cloned())
+            .chain(self.additional_memory_regions.iter())
     }
 }
 
 impl WorkerContext {
-    /// Create a new worker context using unsafe code to handle self-referential lifetimes
-    /// This follows the pattern you suggested with Rc<RefCell<>> for the completion queue
+    /// Create a new worker context using Arc-backed sideway resources.
+    /// Completion queues are shared directly and all QP bookkeeping is prepared upfront.
     pub fn new(worker: &Worker, plan: &Plan, iterations: u32, qp_count: usize) -> Result<Self> {
         info!(
             thread_id = worker.thread_id,
@@ -519,18 +517,18 @@ impl WorkerContext {
         self.queue_pairs.get_mut(index)
     }
 
-    /// Get queue pair by index (unchecked for hot paths)
-    /// SAFETY: Caller must ensure index < queue_pair_count()
+    /// Get queue pair by index (unchecked in release builds).
     #[inline(always)]
-    pub unsafe fn get_queue_pair_unchecked(&self, index: usize) -> &GenericQueuePair {
-        self.queue_pairs.get_unchecked(index)
+    pub fn get_queue_pair_unchecked(&self, index: usize) -> &GenericQueuePair {
+        debug_assert!(index < self.queue_pairs.len());
+        unsafe { self.queue_pairs.get_unchecked(index) }
     }
 
-    /// Get mutable queue pair by index (unchecked for hot paths)
-    /// SAFETY: Caller must ensure index < queue_pair_count()
+    /// Get mutable queue pair by index (unchecked in release builds).
     #[inline(always)]
-    pub unsafe fn get_queue_pair_mut_unchecked(&mut self, index: usize) -> &mut GenericQueuePair {
-        self.queue_pairs.get_unchecked_mut(index)
+    pub fn get_queue_pair_mut_unchecked(&mut self, index: usize) -> &mut GenericQueuePair {
+        debug_assert!(index < self.queue_pairs.len());
+        unsafe { self.queue_pairs.get_unchecked_mut(index) }
     }
 
     /// Get the number of queue pairs
@@ -571,8 +569,7 @@ impl WorkerContext {
 
         for qp_idx in 0..self.queue_pair_count() {
             // Get QP (unchecked for performance)
-            // SAFETY: qp_idx < queue_pair_count(), which is the number of QPs we created
-            let qp = unsafe { self.get_queue_pair_mut_unchecked(qp_idx) };
+            let qp = self.get_queue_pair_mut_unchecked(qp_idx);
 
             // Start post receive guard
             let mut guard = qp.start_post_recv();
