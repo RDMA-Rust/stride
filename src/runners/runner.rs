@@ -14,6 +14,7 @@ use crate::utils::random;
 use anyhow::Result;
 use byte_unit::Byte;
 use quanta::{Clock, Instant, IntoNanoseconds};
+use rand::Rng;
 use sideway::ibverbs::completion::{GenericCompletionQueue, WorkCompletionStatus};
 use sideway::ibverbs::device::DeviceInfo;
 use sideway::ibverbs::queue_pair::{
@@ -254,7 +255,7 @@ impl PlanTestRunner {
 
         // Handle other operations (WRITE, READ)
         while !worker_context.is_complete() {
-            if worker_context.can_post_request(tx_depth) {
+            if worker_context.can_post_request() {
                 let operation_start_time = clock.now(); // Precise timing for single operation
 
                 // Post single operation across QPs (for tx_depth=1, this is typically 1 op)
@@ -316,7 +317,7 @@ impl PlanTestRunner {
 
                 while !worker_context.is_complete() {
                     // Post operations if we can - distribute across multiple QPs
-                    while worker_context.can_post_request(tx_depth) {
+                    while worker_context.can_post_request() {
                         let post_list = self.plan.base().post_list.min(
                             worker_context.total_requests
                                 - worker_context.completed_requests
@@ -420,15 +421,11 @@ impl PlanTestRunner {
         // Proper CQ polling pattern - poll up to cqe_poll_limit completions to prevent bubbles
         match cq.start_poll() {
             Ok(mut poller) => {
-                // PERFORMANCE CRITICAL: Batch completion counting with per-QP tracking
                 let mut completed_count = 0u32;
-                let mut qp_completion_counts = vec![0u32; worker_context.queue_pair_count()];
 
                 // Poll up to cqe_poll_limit completions to maintain posting/polling balance
-                // This prevents pipeline bubbles when completions arrive very fast
                 while completed_count < cqe_poll_limit {
                     if let Some(wc) = poller.next() {
-                        // Hot path: Use const comparison for maximum performance
                         if wc.status() != (WorkCompletionStatus::Success as u32) {
                             return Err(anyhow::anyhow!(
                                 "Failed status {:?} ({}) for iteration {}",
@@ -438,28 +435,16 @@ impl PlanTestRunner {
                             ));
                         }
 
-                        // Extract actual QP index from wr_id
                         // wr_id format: [thread_id:32][qp_idx:16][op_index:16]
                         let qp_idx = ((wc.wr_id() >> 16) & 0xFFFF) as usize;
-                        qp_completion_counts[qp_idx] += 1;
+                        worker_context.record_qp_requests_completed(qp_idx, 1);
                         completed_count += 1;
                     } else {
-                        // No more completions available right now
                         break;
                     }
                 }
 
-                // Batch update: update per-QP completion counts (perftest-style ccnt tracking)
-                if completed_count > 0 {
-                    for (qp_idx, qp_completions) in qp_completion_counts.iter().enumerate() {
-                        if *qp_completions > 0 {
-                            worker_context.record_qp_requests_completed(qp_idx, *qp_completions);
-                        }
-                    }
-                    Ok(true) // Found completions
-                } else {
-                    Ok(false) // No completions in this poll
-                }
+                Ok(completed_count > 0)
             }
             Err(_) => {
                 // No completions available
@@ -491,23 +476,15 @@ impl PlanTestRunner {
         let _inflight = worker_context.inflight_requests;
         let qp_count = worker_context.queue_pair_count();
 
-        // perftest approach: each QP posts post_list operations (not split across QPs)
-        // With per-QP tx_depth control like perftest's scnt/ccnt pattern
         for qp_idx in 0..qp_count {
-            // perftest-style per-QP flow control check
-            if !worker_context.can_qp_post_request(qp_idx, tx_depth) {
-                continue; // Skip this QP if it's at tx_depth limit
-            }
-
-            // Calculate how many operations this QP can actually post
+            // Calculate how many operations this QP can actually post (perftest-style scnt/ccnt pattern)
             let qp_inflight =
                 worker_context.qp_send_counts[qp_idx] - worker_context.qp_completion_counts[qp_idx];
+            if qp_inflight >= tx_depth {
+                continue; // Skip this QP if it's at tx_depth limit
+            }
             let qp_available_slots = tx_depth - qp_inflight;
             let actual_post_list = post_list.min(qp_available_slots as usize);
-
-            if actual_post_list == 0 {
-                continue; // No slots available for this QP
-            }
 
             // Pre-calculate base values for this QP's operations
             let qp_operation_base = worker_context.qp_send_counts[qp_idx];
@@ -644,7 +621,24 @@ impl PlanTestRunner {
             MemoryType::Aligned(AlignedConfig::new(total_buffer_size, CACHE_LINE_SIZE))
         };
 
-        let shared_memory = MemoryAllocator::allocate(memory_type)?;
+        let mut shared_memory = MemoryAllocator::allocate(memory_type)?;
+
+        // Prefill the shared buffer with random data to:
+        //   * Fault in all pages up front (avoid first-iteration page faults)
+        //   * Match perftest-style buffer initialization behavior.
+        const PREFILL_CHUNK: usize = 4096;
+        let total_size = shared_memory.size();
+        let mut rng = rand::thread_rng();
+        let mut prefill_buf = [0u8; PREFILL_CHUNK];
+        let mut offset = 0usize;
+
+        while offset < total_size {
+            let remaining = total_size - offset;
+            let len = remaining.min(PREFILL_CHUNK);
+            rng.fill(&mut prefill_buf[..len]);
+            shared_memory.write(offset, &prefill_buf[..len])?;
+            offset += len;
+        }
 
         // Create single shared memory region
         let shared_mr = unsafe {

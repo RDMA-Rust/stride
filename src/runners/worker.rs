@@ -93,6 +93,8 @@ pub struct WorkerContext {
     pub qp_remote_addrs: Vec<u64>,
     /// TX depth for index calculations (cached for performance)
     pub tx_depth: u32,
+    /// Maximum number of in-flight requests allowed globally (tx_depth * qp_count)
+    pub max_inflight_requests: u32,
     /// Per-QP send counters (like perftest's scnt[])
     pub qp_send_counts: Vec<u32>,
     /// Per-QP completion counters (like perftest's ccnt[])
@@ -359,13 +361,17 @@ impl WorkerContext {
             None
         };
 
+        let tx_depth = worker.tx_depth;
+        let max_inflight_requests = tx_depth.saturating_mul(qp_count as u32);
+
         Ok(Self {
             send_completion_queue: send_cq,
             recv_completion_queue: recv_cq,
             queue_pairs: Vec::new(),
             qp_buffer_addrs: Vec::new(),
             qp_remote_addrs: Vec::new(),
-            tx_depth: worker.tx_depth,
+            tx_depth,
+            max_inflight_requests,
             qp_send_counts: Vec::new(),
             qp_completion_counts: Vec::new(),
             total_requests: iterations * qp_count as u32,
@@ -429,9 +435,11 @@ impl WorkerContext {
     }
 
     /// Check if worker can post more requests (global check)
-    pub fn can_post_request(&self, tx_depth: u32) -> bool {
+    pub fn can_post_request(&self) -> bool {
+        // Allow up to tx_depth outstanding requests per QP (perftest-style),
+        // while still respecting total_requests.
         self.completed_requests + self.inflight_requests < self.total_requests
-            && self.inflight_requests < tx_depth
+            && self.inflight_requests < self.max_inflight_requests
     }
 
     /// Check if a specific QP can post more requests (perftest-style per-QP flow control)

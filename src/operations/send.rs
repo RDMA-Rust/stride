@@ -607,10 +607,14 @@ pub fn execute_send_bandwidth_test(
         "Starting SEND bandwidth test with flow control"
     );
 
-    // Bandwidth test: post operations in batches and wait for completions
-    let mut iteration = 0;
-    while !worker_context.is_complete() {
-        iteration += 1;
+        // Cache role flags outside the loop to avoid repeated plan.base() lookups in hot path
+        let is_server = worker.plan.base().server;
+        let is_bidir = worker.plan.base().bidir;
+
+        // Bandwidth test: post operations in batches and wait for completions
+        let mut iteration = 0;
+        while !worker_context.is_complete() {
+            iteration += 1;
 
         // Only ensure receive buffers are available on server side when needed
         // Don't post every iteration - only when actually needed based on flow control
@@ -629,8 +633,7 @@ pub fn execute_send_bandwidth_test(
 
         // Only post SEND operations if we're a client (in unidirectional mode)
         // In bidirectional mode, both client and server post SEND operations
-        if (!worker.plan.base().server || worker.plan.base().bidir)
-            && worker_context.can_post_request(worker.tx_depth)
+        if (!is_server || is_bidir) && worker_context.can_post_request()
         {
             // Calculate batch size based on remaining requests
             let remaining_requests =
@@ -660,13 +663,13 @@ pub fn execute_send_bandwidth_test(
 
         // Poll for completions more frequently
         // For server in unidirectional mode, receive completions count as progress
-        let track_recv_progress = worker.plan.base().server && !worker.plan.base().bidir;
+        let track_recv_progress = is_server && !is_bidir;
         let (_send_completions, recv_completions) =
             poll_send_completions(worker_context, &mut send_executor, track_recv_progress)?;
 
         // If we processed receive completions, intelligently reload receive buffers (server only)
         // CRITICAL FIX: Only post buffers if we don't have enough for remaining iterations
-        if recv_completions > 0 && worker.plan.base().server {
+        if recv_completions > 0 && is_server {
             let remaining_iterations =
                 worker_context.total_requests - worker_context.completed_requests;
 
@@ -803,6 +806,10 @@ pub fn execute_send_latency_test(
         "Starting SEND latency test with flow control"
     );
 
+    // Cache role flags outside the loop to avoid repeated plan.base() lookups in hot path
+    let is_server = worker.plan.base().server;
+    let is_bidir = worker.plan.base().bidir;
+
     while !worker_context.is_complete() || completions_needed > 0 {
         // Post more receive buffers if needed (server only) - BEFORE sending
         // This ensures server always has enough receive buffers available
@@ -830,8 +837,7 @@ pub fn execute_send_latency_test(
         //    * Clients always SEND (unidirectional)
         //    * Both peers SEND in bidirectional mode
         // ---------------------------------------------
-        if (!worker.plan.base().server || worker.plan.base().bidir)
-            && worker_context.can_post_request(worker.tx_depth)
+        if (!is_server || is_bidir) && worker_context.can_post_request()
         {
             let start_time = clock.now();
 
@@ -846,7 +852,7 @@ pub fn execute_send_latency_test(
                 worker_context,
                 &mut send_executor,
                 clock,
-                worker.plan.base().server,
+                is_server,
             )?;
 
             // Server expects 2 completions (SEND + RECV), client expects 1 (SEND only)
@@ -861,7 +867,7 @@ pub fn execute_send_latency_test(
         //    never refill its receive buffers, leading to a dead-lock.
         // ---------------------------------------------
 
-        if worker.plan.base().server && !worker.plan.base().bidir {
+        if is_server && !is_bidir {
             // Track receive completions as progress so that WorkerContext gets
             // updated and the main completion condition can be satisfied.
             let (_send_completions, recv_completions) = poll_send_completions(
