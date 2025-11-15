@@ -1,3 +1,4 @@
+use crate::runners::post_list::select_post_list_slot;
 use crate::runners::worker::{Worker, WorkerContext};
 use anyhow::Result;
 use quanta::IntoNanoseconds;
@@ -363,6 +364,9 @@ impl SendOperationExecutor {
             // Create post guard for this QP
             let mut guard = qp.start_post_send();
 
+            // perftest uses a single buffer slot per post list on a QP
+            let operation_slot = select_post_list_slot(qp_operation_base, tx_depth);
+
             // Each QP posts actual_post_list SEND operations
             for i in 0..actual_post_list {
                 // Global index for wr_id tracking (includes QP information)
@@ -372,9 +376,8 @@ impl SendOperationExecutor {
                 let wr_id =
                     thread_id_shifted | ((qp_idx as u64) << 16) | (global_op_index & 0xFFFF) as u64;
 
-                // Calculate local address for this operation
-                let operation_index = (qp_operation_base + i as u32) % tx_depth;
-                let local_addr = worker.calculate_operation_addr(qp_idx, operation_index as usize);
+                // Reuse the same buffer slot for the entire post list (perftest behavior)
+                let local_addr = worker.calculate_operation_addr(qp_idx, operation_slot as usize);
 
                 // Create SEND work request (start with basic SEND, immediate data support to be added later)
                 let send_handle = guard

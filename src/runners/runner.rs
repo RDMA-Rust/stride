@@ -5,6 +5,7 @@ use crate::connection::{ConnectionParams, ConnectionType, EndpointRole};
 use crate::context::device::open_device_context;
 use crate::memory::{AlignedConfig, HugepageConfig, MemoryAllocator, MemoryType};
 use crate::operations::send;
+use crate::runners::post_list::select_post_list_slot;
 use crate::runners::worker::{Worker, WorkerContext, WorkerResult};
 use crate::utils::display::{
     BandwidthResult, DisplayOutput, LatencyResult, QueuePairDetail, TestConfiguration, TestType,
@@ -480,12 +481,10 @@ impl PlanTestRunner {
         let tx_depth = worker.tx_depth;
         let thread_id_shifted = (worker.thread_id as u64) << 32;
 
-        // Optimize: Replace expensive modulo with bitwise AND (tx_depth must be power of 2)
         debug_assert!(
             tx_depth.is_power_of_two(),
-            "tx_depth must be power of 2 for bitwise optimization"
+            "tx_depth must be power of 2 for deterministic buffer usage"
         );
-        let tx_depth_mask = tx_depth - 1;
 
         // Create buffers for state to avoid borrow conflicts
         let _completed = worker_context.completed_requests;
@@ -516,6 +515,8 @@ impl PlanTestRunner {
             // Pre-calculate all addresses before mutable borrow to avoid borrow conflicts
             let tx_depth_usize = tx_depth as usize;
             let qp_base_index = qp_idx * tx_depth_usize;
+            let operation_slot = select_post_list_slot(qp_operation_base, tx_depth);
+            let flat_index = qp_base_index + operation_slot;
 
             // Extract raw pointers to address arrays before mutable borrow
             let local_addrs_ptr = worker_context.qp_buffer_addrs.as_ptr();
@@ -538,9 +539,6 @@ impl PlanTestRunner {
                     thread_id_shifted | ((qp_idx as u64) << 16) | (global_op_index & 0xFFFF) as u64;
 
                 // PERFORMANCE CRITICAL: Direct flat index calculation for maximum performance
-                let operation_within_qp = (qp_operation_base + i as u32) & tx_depth_mask;
-                let flat_index = qp_base_index + operation_within_qp as usize;
-
                 // Get addresses directly from flattened arrays using raw pointers
                 let local_addr = unsafe { *local_addrs_ptr.add(flat_index) };
 
