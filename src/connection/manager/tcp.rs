@@ -22,7 +22,7 @@ use sideway::ibverbs::device_context::DeviceContext;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
 use sideway::ibverbs::queue_pair::QueuePairAttribute;
 use sideway::ibverbs::queue_pair::QueuePairState;
-use sideway::ibverbs::queue_pair::{GenericQueuePair, QueuePair};
+use sideway::ibverbs::queue_pair::{ExtendedQueuePair, QueuePair};
 use sideway::ibverbs::AccessFlags;
 
 use serde::{Deserialize, Serialize};
@@ -237,7 +237,7 @@ impl ConnectionManager for TcpConnectionManager {
         &self,
         _ctx: &DeviceContext,
         _pd: &ProtectionDomain,
-        qp: &mut GenericQueuePair,
+        qp: &mut ExtendedQueuePair,
         local_data: DestinationInfo,
     ) -> ConnectionResult<DestinationInfo> {
         // Exchange QP information

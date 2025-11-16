@@ -1,7 +1,7 @@
 use sideway::ibverbs::address::Gid;
 use sideway::ibverbs::device_context::{DeviceContext, Mtu};
 use sideway::ibverbs::protection_domain::ProtectionDomain;
-use sideway::ibverbs::queue_pair::{GenericQueuePair, QueuePair};
+use sideway::ibverbs::queue_pair::{ExtendedQueuePair, QueuePair};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -110,7 +110,7 @@ impl ConnectionSession {
     /// Setup a queue pair with the remote peer
     pub fn setup_queue_pair(
         &mut self,
-        qp: &mut GenericQueuePair,
+        qp: &mut ExtendedQueuePair,
     ) -> ConnectionResult<DestinationInfo> {
         // Create local destination info
         let local_psn = random::generate_psn();
@@ -165,7 +165,7 @@ impl ConnectionSession {
     /// Setup queue pair states (simplified version)
     fn setup_qp_states(
         &self,
-        qp: &mut GenericQueuePair,
+        qp: &mut ExtendedQueuePair,
         local_data: &DestinationInfo,
         remote_data: &DestinationInfo,
     ) -> ConnectionResult<()> {

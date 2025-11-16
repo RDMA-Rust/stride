@@ -15,7 +15,7 @@ use anyhow::Result;
 use byte_unit::Byte;
 use quanta::{Clock, Instant, IntoNanoseconds};
 use rand::Rng;
-use sideway::ibverbs::completion::{GenericCompletionQueue, WorkCompletionStatus};
+use sideway::ibverbs::completion::{ExtendedCompletionQueue, WorkCompletionStatus};
 use sideway::ibverbs::device::DeviceInfo;
 use sideway::ibverbs::queue_pair::{
     PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
@@ -229,7 +229,7 @@ impl PlanTestRunner {
         remote_mr: &crate::connection::exchange::MemoryRegionInfo,
         histogram: &mut hdrhistogram::Histogram<u64>,
         clock: &Clock,
-        cq: &GenericCompletionQueue,
+        cq: &std::sync::Arc<ExtendedCompletionQueue>,
         start_time: Instant,
         min_latency_ns: &mut u64,
         max_latency_ns: &mut u64,
@@ -297,7 +297,7 @@ impl PlanTestRunner {
         worker_context: &mut WorkerContext,
         msg_size: u32,
         remote_mr: &crate::connection::exchange::MemoryRegionInfo,
-        cq: &GenericCompletionQueue,
+        cq: &std::sync::Arc<ExtendedCompletionQueue>,
     ) -> Result<()> {
         // Check if this is a SEND operation that needs special handling
         match self.plan {
@@ -350,7 +350,7 @@ impl PlanTestRunner {
     #[inline]
     fn wait_for_completion(
         &self,
-        cq: &GenericCompletionQueue,
+        cq: &std::sync::Arc<ExtendedCompletionQueue>,
         start_time: Instant,
         histogram: &mut hdrhistogram::Histogram<u64>,
         min_latency_ns: &mut u64,
@@ -413,7 +413,7 @@ impl PlanTestRunner {
     #[inline(always)]
     fn poll_completions_once(
         &self,
-        cq: &GenericCompletionQueue,
+        cq: &std::sync::Arc<ExtendedCompletionQueue>,
         worker_context: &mut WorkerContext,
     ) -> Result<bool> {
         let cqe_poll_limit = self.plan.poll_batch(); // Respect user-configured batch size
@@ -477,8 +477,8 @@ impl PlanTestRunner {
 
         for qp_idx in 0..qp_count {
             // Calculate how many operations this QP can actually post (perftest-style scnt/ccnt pattern)
-            let qp_inflight = worker_context.qp_send_counts[qp_idx]
-                - worker_context.qp_completion_counts[qp_idx];
+            let qp_inflight =
+                worker_context.qp_send_counts[qp_idx] - worker_context.qp_completion_counts[qp_idx];
             if qp_inflight >= tx_depth {
                 continue; // Skip this QP if it's at tx_depth limit
             }

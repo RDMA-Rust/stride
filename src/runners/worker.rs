@@ -3,12 +3,12 @@ use crate::memory::aligned::DEFAULT_CACHE_LINE_SIZE;
 use crate::memory::MemoryOps;
 use anyhow::Result;
 use sideway::ibverbs::completion::{
-    CreateCompletionQueueWorkCompletionFlags, GenericCompletionQueue,
+    CreateCompletionQueueWorkCompletionFlags, ExtendedCompletionQueue,
 };
 use sideway::ibverbs::device_context::DeviceContext;
 use sideway::ibverbs::memory_region::MemoryRegion;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
-use sideway::ibverbs::queue_pair::GenericQueuePair;
+use sideway::ibverbs::queue_pair::ExtendedQueuePair;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -80,11 +80,11 @@ pub struct Worker {
 /// completion queues directly while keeping deterministic drop ordering (QP before CQ).
 pub struct WorkerContext {
     /// Queue pairs owned by this worker
-    pub queue_pairs: Vec<GenericQueuePair>,
+    pub queue_pairs: Vec<ExtendedQueuePair>,
     /// Send completion queue shared across queue pairs
-    pub send_completion_queue: GenericCompletionQueue,
+    pub send_completion_queue: std::sync::Arc<ExtendedCompletionQueue>,
     /// Receive completion queue shared across queue pairs (for SEND operations)
-    pub recv_completion_queue: Option<GenericCompletionQueue>,
+    pub recv_completion_queue: Option<std::sync::Arc<ExtendedCompletionQueue>>,
     /// Pre-calculated local buffer addresses flattened for cache efficiency
     /// Format: qp_buffer_addrs[qp_idx * tx_depth + operation_index] = local_addr
     pub qp_buffer_addrs: Vec<u64>,
@@ -325,14 +325,13 @@ impl WorkerContext {
         // Create the send completion queue using the worker's device
         let send_cqe_size = worker.tx_depth * qp_count as u32;
 
-        let send_cq: GenericCompletionQueue = worker
+        let send_cq = worker
             .device
             .create_cq_builder()
             .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
             .setup_cqe(send_cqe_size)
             .build_ex()
-            .map_err(|e| anyhow::anyhow!("Failed to create send CQ: {}", e))?
-            .into();
+            .map_err(|e| anyhow::anyhow!("Failed to create send CQ: {}", e))?;
 
         // For SEND operations, create a separate receive completion queue
         let recv_cq = if matches!(plan, crate::cli::plan::Plan::Send(_)) {
@@ -347,14 +346,13 @@ impl WorkerContext {
                 "Creating separate receive CQ for SEND operations"
             );
 
-            let recv_cq: GenericCompletionQueue = worker
+            let recv_cq = worker
                 .device
                 .create_cq_builder()
                 .setup_wc_flags(CreateCompletionQueueWorkCompletionFlags::StandardFlags)
                 .setup_cqe(recv_cqe_size)
                 .build_ex()
-                .map_err(|e| anyhow::anyhow!("Failed to create recv CQ: {}", e))?
-                .into();
+                .map_err(|e| anyhow::anyhow!("Failed to create recv CQ: {}", e))?;
 
             Some(recv_cq)
         } else {
@@ -390,7 +388,7 @@ impl WorkerContext {
             .clone()
             .unwrap_or_else(|| self.send_completion_queue.clone());
 
-        let qp = worker
+        let qp: ExtendedQueuePair = worker
             .pd
             .create_qp_builder()
             .setup_max_inline_data(256)
@@ -399,8 +397,7 @@ impl WorkerContext {
             .setup_max_send_wr(worker.tx_depth)
             .setup_max_recv_wr(worker.rx_depth.unwrap_or(512))
             .build_ex()
-            .map_err(|e| anyhow::anyhow!("Failed to create QP: {}", e))?
-            .into();
+            .map_err(|e| anyhow::anyhow!("Failed to create QP: {}", e))?;
 
         debug!(
             thread_id = worker.thread_id,
@@ -516,25 +513,25 @@ impl WorkerContext {
     }
 
     /// Get queue pair by index (bounds-checked)
-    pub fn get_queue_pair(&self, index: usize) -> Option<&GenericQueuePair> {
+    pub fn get_queue_pair(&self, index: usize) -> Option<&ExtendedQueuePair> {
         self.queue_pairs.get(index)
     }
 
     /// Get mutable queue pair by index (bounds-checked)
-    pub fn get_queue_pair_mut(&mut self, index: usize) -> Option<&mut GenericQueuePair> {
+    pub fn get_queue_pair_mut(&mut self, index: usize) -> Option<&mut ExtendedQueuePair> {
         self.queue_pairs.get_mut(index)
     }
 
     /// Get queue pair by index (unchecked in release builds).
     #[inline(always)]
-    pub fn get_queue_pair_unchecked(&self, index: usize) -> &GenericQueuePair {
+    pub fn get_queue_pair_unchecked(&self, index: usize) -> &ExtendedQueuePair {
         debug_assert!(index < self.queue_pairs.len());
         unsafe { self.queue_pairs.get_unchecked(index) }
     }
 
     /// Get mutable queue pair by index (unchecked in release builds).
     #[inline(always)]
-    pub fn get_queue_pair_mut_unchecked(&mut self, index: usize) -> &mut GenericQueuePair {
+    pub fn get_queue_pair_mut_unchecked(&mut self, index: usize) -> &mut ExtendedQueuePair {
         debug_assert!(index < self.queue_pairs.len());
         unsafe { self.queue_pairs.get_unchecked_mut(index) }
     }
@@ -545,17 +542,17 @@ impl WorkerContext {
     }
 
     /// Get send completion queue (for polling operations)
-    pub fn completion_queue(&self) -> &GenericCompletionQueue {
+    pub fn completion_queue(&self) -> &std::sync::Arc<ExtendedCompletionQueue> {
         &self.send_completion_queue
     }
 
     /// Get send completion queue (explicit)
-    pub fn send_completion_queue(&self) -> &GenericCompletionQueue {
+    pub fn send_completion_queue(&self) -> &std::sync::Arc<ExtendedCompletionQueue> {
         &self.send_completion_queue
     }
 
     /// Get receive completion queue (for SEND operations)
-    pub fn recv_completion_queue(&self) -> Option<&GenericCompletionQueue> {
+    pub fn recv_completion_queue(&self) -> Option<&std::sync::Arc<ExtendedCompletionQueue>> {
         self.recv_completion_queue.as_ref()
     }
 

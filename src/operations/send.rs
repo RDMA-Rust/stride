@@ -2,7 +2,7 @@ use crate::runners::post_list::select_post_list_slot;
 use crate::runners::worker::{Worker, WorkerContext};
 use anyhow::Result;
 use quanta::IntoNanoseconds;
-use sideway::ibverbs::completion::{GenericCompletionQueue, WorkCompletionStatus};
+use sideway::ibverbs::completion::{ExtendedCompletionQueue, WorkCompletionStatus};
 use sideway::ibverbs::queue_pair::{
     PostSendGuard, QueuePair, SetScatterGatherEntry, WorkRequestFlags,
 };
@@ -607,14 +607,14 @@ pub fn execute_send_bandwidth_test(
         "Starting SEND bandwidth test with flow control"
     );
 
-        // Cache role flags outside the loop to avoid repeated plan.base() lookups in hot path
-        let is_server = worker.plan.base().server;
-        let is_bidir = worker.plan.base().bidir;
+    // Cache role flags outside the loop to avoid repeated plan.base() lookups in hot path
+    let is_server = worker.plan.base().server;
+    let is_bidir = worker.plan.base().bidir;
 
-        // Bandwidth test: post operations in batches and wait for completions
-        let mut iteration = 0;
-        while !worker_context.is_complete() {
-            iteration += 1;
+    // Bandwidth test: post operations in batches and wait for completions
+    let mut iteration = 0;
+    while !worker_context.is_complete() {
+        iteration += 1;
 
         // Only ensure receive buffers are available on server side when needed
         // Don't post every iteration - only when actually needed based on flow control
@@ -633,8 +633,7 @@ pub fn execute_send_bandwidth_test(
 
         // Only post SEND operations if we're a client (in unidirectional mode)
         // In bidirectional mode, both client and server post SEND operations
-        if (!is_server || is_bidir) && worker_context.can_post_request()
-        {
+        if (!is_server || is_bidir) && worker_context.can_post_request() {
             // Calculate batch size based on remaining requests
             let remaining_requests =
                 worker_context.total_requests - worker_context.completed_requests;
@@ -837,8 +836,7 @@ pub fn execute_send_latency_test(
         //    * Clients always SEND (unidirectional)
         //    * Both peers SEND in bidirectional mode
         // ---------------------------------------------
-        if (!is_server || is_bidir) && worker_context.can_post_request()
-        {
+        if (!is_server || is_bidir) && worker_context.can_post_request() {
             let start_time = clock.now();
 
             // Post single SEND operation
@@ -889,7 +887,7 @@ pub fn execute_send_latency_test(
 
 /// Wait for SEND completion and handle flow control
 fn wait_for_send_completion(
-    cq: &GenericCompletionQueue,
+    cq: &std::sync::Arc<ExtendedCompletionQueue>,
     start_time: quanta::Instant,
     histogram: &mut hdrhistogram::Histogram<u64>,
     worker_context: &mut WorkerContext,

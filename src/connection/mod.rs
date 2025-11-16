@@ -11,7 +11,7 @@ use crate::connection::exchange::MemoryRegionInfo;
 use exchange::TestResults;
 use sideway::ibverbs::device_context::DeviceContext;
 use sideway::ibverbs::protection_domain::ProtectionDomain;
-use sideway::ibverbs::queue_pair::GenericQueuePair;
+use sideway::ibverbs::queue_pair::ExtendedQueuePair;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -170,7 +170,7 @@ pub trait ConnectionManager: Send + Sync {
         &self,
         ctx: &DeviceContext,
         pd: &ProtectionDomain,
-        qp: &mut GenericQueuePair,
+        qp: &mut ExtendedQueuePair,
         local_data: DestinationInfo,
     ) -> ConnectionResult<DestinationInfo>;
 }
