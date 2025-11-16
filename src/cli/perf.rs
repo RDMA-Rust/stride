@@ -172,6 +172,10 @@ pub struct CommonOpts {
     /// Use hugepages for memory allocations
     #[arg(long)]
     pub use_hugepages: bool,
+    /// Use CUDA device <DEVICE_ID> for GPU memory (perftest-style)
+    #[cfg(feature = "cuda")]
+    #[arg(long = "use-cuda")]
+    pub cuda_device_id: Option<u32>,
     /// MTU size (Byte)
     #[arg(long, short = 'm', value_enum, default_value_t = PathMtu::default())]
     pub mtu: PathMtu,
@@ -318,6 +322,10 @@ impl TryFrom<Cli> for Plan {
             post_list: common.post_list,
             cqe_poll: common.cqe_poll,
             hugepages: common.use_hugepages,
+            #[cfg(feature = "cuda")]
+            cuda_device_id: common.cuda_device_id,
+            #[cfg(not(feature = "cuda"))]
+            cuda_device_id: None,
             mtu: common.mtu.0,
             output,
         };

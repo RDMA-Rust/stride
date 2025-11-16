@@ -3,6 +3,8 @@ use anyhow::Result;
 pub mod aligned;
 pub mod hugepage;
 pub mod system;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 
 pub trait MemoryOps {
     fn size(&self) -> usize;
@@ -101,12 +103,37 @@ impl HugepageConfig {
     }
 }
 
+/// Configuration for CUDA memory
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+pub struct CudaConfig {
+    pub config: MemoryConfig,
+    pub device_id: u32,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaConfig {
+    pub fn new(size: usize, device_id: u32) -> Self {
+        Self {
+            config: MemoryConfig::new(size),
+            device_id,
+        }
+    }
+
+    pub fn with_numa_node(mut self, node: i32) -> Self {
+        self.config = self.config.with_numa_node(node);
+        self
+    }
+}
+
 /// Memory type enumeration
 #[derive(Debug, Clone, Copy)]
 pub enum MemoryType {
     System(SystemConfig),
     Aligned(AlignedConfig),
     Hugepages(HugepageConfig),
+    #[cfg(feature = "cuda")]
+    Cuda(CudaConfig),
 }
 
 /// Memory allocator factory
@@ -136,6 +163,11 @@ impl MemoryAllocator {
                     page_size_shift,
                 )?) as Box<dyn MemoryOps>)
             }
+            #[cfg(feature = "cuda")]
+            MemoryType::Cuda(config) => Ok(Box::new(cuda::CudaMemory::new(
+                config.config.size,
+                config.device_id,
+            )?) as Box<dyn MemoryOps>),
         }
     }
 
@@ -152,5 +184,11 @@ impl MemoryAllocator {
     /// Convenience function to create hugepage memory
     pub fn hugepages(size: usize) -> Result<Box<dyn MemoryOps>> {
         Self::allocate(MemoryType::Hugepages(HugepageConfig::new(size)))
+    }
+
+    /// Convenience function to create CUDA memory (when enabled)
+    #[cfg(feature = "cuda")]
+    pub fn cuda(size: usize, device_id: u32) -> Result<Box<dyn MemoryOps>> {
+        Self::allocate(MemoryType::Cuda(CudaConfig::new(size, device_id)))
     }
 }

@@ -32,6 +32,7 @@ pub struct PlanBase {
     pub post_list: u32,
     pub cqe_poll: u32,
     pub hugepages: bool,
+    pub cuda_device_id: Option<u32>,
     pub mtu: Mtu,
     pub output: OutputConfig,
 }

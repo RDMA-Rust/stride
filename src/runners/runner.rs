@@ -615,10 +615,28 @@ impl PlanTestRunner {
         );
 
         // Allocate single shared memory region for all QPs (perftest approach)
-        let memory_type = if self.plan.base().hugepages {
-            MemoryType::Hugepages(HugepageConfig::new(total_buffer_size))
-        } else {
-            MemoryType::Aligned(AlignedConfig::new(total_buffer_size, CACHE_LINE_SIZE))
+        let memory_type = {
+            #[cfg(feature = "cuda")]
+            if let Some(cuda_dev) = self.plan.base().cuda_device_id {
+                info!(
+                    "Using CUDA device {} for shared buffer (perftest-style --use-cuda)",
+                    cuda_dev
+                );
+                MemoryType::Cuda(crate::memory::CudaConfig::new(total_buffer_size, cuda_dev))
+            } else if self.plan.base().hugepages {
+                MemoryType::Hugepages(HugepageConfig::new(total_buffer_size))
+            } else {
+                MemoryType::Aligned(AlignedConfig::new(total_buffer_size, CACHE_LINE_SIZE))
+            }
+
+            #[cfg(not(feature = "cuda"))]
+            {
+                if self.plan.base().hugepages {
+                    MemoryType::Hugepages(HugepageConfig::new(total_buffer_size))
+                } else {
+                    MemoryType::Aligned(AlignedConfig::new(total_buffer_size, CACHE_LINE_SIZE))
+                }
+            }
         };
 
         let mut shared_memory = MemoryAllocator::allocate(memory_type)?;
