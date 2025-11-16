@@ -1,11 +1,7 @@
-/// Determine which buffer slot a QP should use when posting a list of SENDs.
 #[inline(always)]
 pub fn select_post_list_slot(qp_operation_base: u32, tx_depth: u32) -> usize {
-    if tx_depth == 0 {
-        0
-    } else {
-        (qp_operation_base % tx_depth) as usize
-    }
+    debug_assert!(tx_depth.is_power_of_two());
+    (qp_operation_base & (tx_depth - 1)) as usize
 }
 
 #[cfg(test)]

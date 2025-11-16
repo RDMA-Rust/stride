@@ -454,6 +454,7 @@ impl PlanTestRunner {
     }
 
     /// Helper method to post operations to QPs
+    #[inline(always)]
     fn post_operations(
         &self,
         worker: &Worker,
@@ -471,15 +472,13 @@ impl PlanTestRunner {
             "tx_depth must be power of 2 for deterministic buffer usage"
         );
 
-        // Create buffers for state to avoid borrow conflicts
-        let _completed = worker_context.completed_requests;
-        let _inflight = worker_context.inflight_requests;
         let qp_count = worker_context.queue_pair_count();
+        let tx_depth_usize = tx_depth as usize;
 
         for qp_idx in 0..qp_count {
             // Calculate how many operations this QP can actually post (perftest-style scnt/ccnt pattern)
-            let qp_inflight =
-                worker_context.qp_send_counts[qp_idx] - worker_context.qp_completion_counts[qp_idx];
+            let qp_inflight = worker_context.qp_send_counts[qp_idx]
+                - worker_context.qp_completion_counts[qp_idx];
             if qp_inflight >= tx_depth {
                 continue; // Skip this QP if it's at tx_depth limit
             }
@@ -488,9 +487,6 @@ impl PlanTestRunner {
 
             // Pre-calculate base values for this QP's operations
             let qp_operation_base = worker_context.qp_send_counts[qp_idx];
-
-            // Pre-calculate all addresses before mutable borrow to avoid borrow conflicts
-            let tx_depth_usize = tx_depth as usize;
             let qp_base_index = qp_idx * tx_depth_usize;
             let operation_slot = select_post_list_slot(qp_operation_base, tx_depth);
             let flat_index = qp_base_index + operation_slot;
@@ -507,33 +503,43 @@ impl PlanTestRunner {
             let mut guard = qp.start_post_send();
 
             // Each QP posts actual_post_list operations (perftest style with flow control)
-            for i in 0..actual_post_list {
-                // Global index for wr_id tracking (includes QP information)
-                let global_op_index = qp_operation_base + i as u32;
-                // Encode QP index in wr_id for proper completion tracking
-                // Format: [thread_id:32][qp_idx:16][op_index:16]
-                let wr_id =
-                    thread_id_shifted | ((qp_idx as u64) << 16) | (global_op_index & 0xFFFF) as u64;
+            if is_write {
+                for i in 0..actual_post_list {
+                    // Global index for wr_id tracking (includes QP information)
+                    let global_op_index = qp_operation_base + i as u32;
+                    // Encode QP index in wr_id for proper completion tracking
+                    // Format: [thread_id:32][qp_idx:16][op_index:16]
+                    let wr_id = thread_id_shifted
+                        | ((qp_idx as u64) << 16)
+                        | (global_op_index & 0xFFFF) as u64;
 
-                // PERFORMANCE CRITICAL: Direct flat index calculation for maximum performance
-                // Get addresses directly from flattened arrays using raw pointers
-                let local_addr = unsafe { *local_addrs_ptr.add(flat_index) };
-
-                // For WRITE operations, use pre-calculated remote addresses
-                let send_handle = if is_write {
+                    let local_addr = unsafe { *local_addrs_ptr.add(flat_index) };
                     let remote_addr = unsafe { *remote_addrs_ptr.add(flat_index) };
-                    guard
-                        .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                        .setup_write(remote_mr.rkey, remote_addr)
-                } else {
-                    guard
-                        .construct_wr(wr_id, WorkRequestFlags::Signaled)
-                        .setup_send()
-                };
 
-                // Setup scatter-gather entry
-                unsafe {
-                    send_handle.setup_sge(worker.lkey(), local_addr, msg_size);
+                    let send_handle = guard
+                        .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                        .setup_write(remote_mr.rkey, remote_addr);
+
+                    unsafe {
+                        send_handle.setup_sge(worker.lkey(), local_addr, msg_size);
+                    }
+                }
+            } else {
+                for i in 0..actual_post_list {
+                    let global_op_index = qp_operation_base + i as u32;
+                    let wr_id = thread_id_shifted
+                        | ((qp_idx as u64) << 16)
+                        | (global_op_index & 0xFFFF) as u64;
+
+                    let local_addr = unsafe { *local_addrs_ptr.add(flat_index) };
+
+                    let send_handle = guard
+                        .construct_wr(wr_id, WorkRequestFlags::Signaled)
+                        .setup_send();
+
+                    unsafe {
+                        send_handle.setup_sge(worker.lkey(), local_addr, msg_size);
+                    }
                 }
             }
 
